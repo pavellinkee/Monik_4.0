@@ -144,8 +144,9 @@ providers:
 
   - provider_id: uniswap
     enabled: true
-    # Участвует в обоих режимах.
-    modes: [ur, fest]
+    # Единственный агрегатор торгового режима: на суммах 50-100 USDT
+    # только у него газ укладывается в целевую прибыль.
+    modes: [ur, fest, ann]
     emoji: "🧩"
     ui_url: "https://app.uniswap.org/swap"
     # Покупка и продажа у этого агрегатора. Разрешение двухуровневое:
@@ -379,6 +380,16 @@ scanner:
     fest:
       enabled: true
       interval_seconds: 30
+    # ann — торговый проход (the_main_rules.md, правило 11). Сканирует все
+    # суммы сразу, выбирает лучшую находку по заработку в USDT и исполняет
+    # сделку сам. Пока подсистемы исполнения нет, его находки только
+    # записываются в журнал — это сухой прогон режима.
+    ann:
+      enabled: true
+      interval_seconds: 30
+      # Торговлю начинаем в одной сети. Polygon остаётся под наблюдением
+      # остальных режимов.
+      networks: [arbitrum]
 
   level1:
     # Сумма поиска. Level 1 работает одной суммой: остальные Level 2
@@ -419,6 +430,7 @@ profitability:
   thresholds:
     ur: "0.1"
     fest: "0.02"
+    ann: "0.02"
 
 fees:
   enabled: true

@@ -708,7 +708,7 @@ class TestBestCombination:
         document = level1_document()
         document["profitability"] = {
             "threshold_metric": "net_roi",
-            "thresholds": {"ur": "999", "fest": "999"},
+            "thresholds": {"ur": "999", "fest": "999", "ann": "999"},
         }
         configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
         harness = build_harness(configuration, database, clock)
@@ -888,7 +888,7 @@ class TestModeThreshold:
 
     def test_each_mode_has_its_own_threshold(self) -> None:
         document = level1_document()
-        document["profitability"] = {"thresholds": {"ur": "0.1", "fest": "0.02"}}
+        document["profitability"] = {"thresholds": {"ur": "0.1", "fest": "0.02", "ann": "0.02"}}
         profitability = parse_configuration(document, environ=dict(VALID_ENV)).config.profitability
 
         assert profitability.threshold_for(ScanMode.UR) == Decimal("0.1")
@@ -906,13 +906,13 @@ class TestModeThreshold:
     ) -> None:
         """Проход судит найденное планкой своего режима."""
         document = level1_document()
-        document["profitability"] = {"thresholds": {"ur": "999", "fest": "999"}}
+        document["profitability"] = {"thresholds": {"ur": "999", "fest": "999", "ann": "999"}}
         configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
         harness = build_harness(configuration, database, clock)
 
         assert not (await harness.scanner.scan_all(ScanMode.UR))[0].opportunities
 
-        document["profitability"] = {"thresholds": {"ur": "-100", "fest": "999"}}
+        document["profitability"] = {"thresholds": {"ur": "-100", "fest": "999", "ann": "999"}}
         configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
         harness = build_harness(configuration, database, clock)
 
@@ -923,7 +923,7 @@ class TestModeThreshold:
     ) -> None:
         """Level 2 обязан судить возможность планкой её режима."""
         document = level1_document()
-        document["profitability"] = {"thresholds": {"ur": "-100", "fest": "-100"}}
+        document["profitability"] = {"thresholds": {"ur": "-100", "fest": "-100", "ann": "-100"}}
         configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
         harness = build_harness(configuration, database, clock)
 

@@ -41,7 +41,7 @@ class ProfitabilityConfig(ConfigSection):
     #: стейблкоинам судится своей планкой просто потому, что это другой
     #: режим.
     thresholds: dict[ScanMode, SignedDecimal] = Field(
-        default_factory=lambda: {ScanMode.UR: Decimal("1.00"), ScanMode.FEST: Decimal("1.00")}
+        default_factory=lambda: dict.fromkeys(ScanMode, Decimal("1.00"))
     )
     treat_unknown_cost_as_blocking: bool = True
 

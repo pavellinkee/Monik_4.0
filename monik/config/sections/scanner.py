@@ -10,6 +10,7 @@ from pydantic import Field, model_validator
 from monik.config.base import ConfigSection
 from monik.domain.enums.modes import ScanMode
 from monik.domain.enums.scheduler import OverlapPolicy
+from monik.domain.value_objects.identity import NetworkId
 from monik.domain.value_objects.numeric import PositiveDecimal
 
 __all__ = [
@@ -52,6 +53,13 @@ class ScanModeConfig(ConfigSection):
     #: молча гасила бы режим.
     enabled: bool = True
     interval_seconds: int = Field(default=300, ge=5, le=86_400)
+    #: Сети, в которых работает режим. ``None`` — все включённые.
+    #:
+    #: Нужно потому, что режимы не обязаны совпадать по охвату: торговый
+    #: проход разумно начинать в одной сети, пока остальные только
+    #: наблюдаются. Сеть при этом должна быть включена глобально —
+    #: режим сужает набор, но не включает выключенное.
+    networks: tuple[NetworkId, ...] | None = None
 
 
 class ScanModesConfig(ConfigSection):
@@ -70,10 +78,14 @@ class ScanModesConfig(ConfigSection):
     #: его не застаёт. Набор определяется меткой ``usd_stable``, а не
     #: списком имён.
     fest: ScanModeConfig = ScanModeConfig(enabled=False, interval_seconds=30)
+    #: Торговый проход. Сканирует все суммы сразу и выбирает лучшую по
+    #: заработку в базовом токене; исполнение — отдельная подсистема,
+    #: которая включается своим флагом.
+    ann: ScanModeConfig = ScanModeConfig(enabled=False, interval_seconds=30)
 
     def for_mode(self, mode: ScanMode) -> ScanModeConfig:
         """Настройки режима."""
-        return self.ur if mode is ScanMode.UR else self.fest
+        return {ScanMode.UR: self.ur, ScanMode.FEST: self.fest, ScanMode.ANN: self.ann}[mode]
 
     def enabled_modes(self) -> tuple[ScanMode, ...]:
         """Режимы, включённые оператором, в порядке объявления."""

@@ -1,0 +1,165 @@
+"""Режим ann — торговый проход.
+
+Отличается от ``ur`` и ``fest`` тремя вещами (``the_main_rules.md``,
+правило 11): сканирует **все** суммы сразу, выбирает лучшую находку по
+**заработку в базовом токене**, а не по доходности в процентах, и может
+работать в собственном подмножестве сетей.
+
+Само исполнение сделок — отдельная подсистема; пока её нет, найденное
+режимом только записывается в журнал и возможностей не создаёт.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any
+
+import pytest
+
+from monik.config import parse_configuration
+from monik.domain.enums.modes import ScanMode
+from monik.domain.value_objects.identity import NetworkId
+from monik.infrastructure.db import Database
+from monik.services.observability import FakeClock
+from tests.component.level1.conftest import Level1Harness, build_harness, level1_document
+from tests.component.level1.test_multi_network import two_network_document
+from tests.unit.config.conftest import VALID_ENV
+
+POLYGON = NetworkId("polygon")
+ARBITRUM = NetworkId("arbitrum")
+
+
+def _stable_document(**overrides: Any) -> dict[str, Any]:
+    """Набор, в котором есть стабильные и нестабильные токены."""
+    document = level1_document()
+    for token in document["tokens"]:
+        if token["symbol"] in {"USDT", "AAVE"}:
+            token["usd_stable"] = True
+    document["tokens"].append(
+        {
+            "network_id": "polygon",
+            "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+            "symbol": "WETH",
+            "decimals": 18,
+            "rank": 4,
+        }
+    )
+    document["scanner"]["amounts"] = ["50", "100"]
+    document["scanner"]["modes"] = {"ann": {"enabled": True, "interval_seconds": 30}}
+    document["scanner"]["level1"] = {"amount": "50", "scan_timeout_seconds": 30}
+    document["profitability"] = {"thresholds": {"ur": "-100", "fest": "-100", "ann": "-100"}}
+    document.update(overrides)
+    return document
+
+
+def _harness(document: dict[str, Any], database: Database, clock: FakeClock) -> Level1Harness:
+    configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
+    return build_harness(configuration, database, clock)
+
+
+class TestScope:
+    def test_ann_scans_every_configured_amount(self, database: Database, clock: FakeClock) -> None:
+        """Все суммы сразу: размер сделки — часть решения, а не проверка."""
+        harness = _harness(_stable_document(), database, clock)
+
+        ann = harness.scanner.scopes(ScanMode.ANN)[0]
+        ur = harness.scanner.scopes(ScanMode.UR)[0]
+
+        assert len(ann.raw_amounts) == 2
+        assert ann.raw_amounts == (50_000_000, 100_000_000)
+        assert len(ur.raw_amounts) == 1, "ur по-прежнему ищет одной суммой"
+
+    def test_ann_takes_only_stable_tokens(self, database: Database, clock: FakeClock) -> None:
+        harness = _harness(_stable_document(), database, clock)
+
+        scope = harness.scanner.scopes(ScanMode.ANN)[0]
+        symbols = {harness.tokens.require(key).symbol for key in scope.tokens}
+
+        assert symbols == {"AAVE"}, "WETH не помечен usd_stable и в торговый проход не входит"
+
+    def test_mode_can_be_limited_to_its_own_networks(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        """Торговый проход начинают в одной сети, пока остальные наблюдаются."""
+        document = two_network_document()
+        document["scanner"]["modes"] = {
+            "ann": {"enabled": True, "interval_seconds": 30, "networks": ["arbitrum"]}
+        }
+        document["scanner"]["level1"] = {"scan_timeout_seconds": 30}
+        document["profitability"] = {"thresholds": {"ur": "-100", "fest": "-100", "ann": "-100"}}
+        harness = _harness(document, database, clock)
+
+        assert [s.networks for s in harness.scanner.scopes(ScanMode.ANN)] == [(ARBITRUM,)]
+        assert [s.networks for s in harness.scanner.scopes(ScanMode.UR)] == [
+            (POLYGON,),
+            (ARBITRUM,),
+        ]
+
+    def test_mode_cannot_enable_a_disabled_network(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        """Режим сужает набор сетей, но не включает выключенную."""
+        document = two_network_document()
+        document["networks"][1]["enabled"] = False
+        document["tokens"] = [t for t in document["tokens"] if t["network_id"] != "arbitrum"]
+        document["scanner"]["modes"] = {
+            "ann": {"enabled": True, "interval_seconds": 30, "networks": ["arbitrum"]}
+        }
+        document["scanner"]["level1"] = {"scan_timeout_seconds": 30}
+        document["profitability"] = {"thresholds": {"ur": "-100", "fest": "-100", "ann": "-100"}}
+        harness = _harness(document, database, clock)
+
+        assert harness.scanner.scopes(ScanMode.ANN) == ()
+
+
+class TestSelection:
+    async def test_no_opportunity_is_created_without_a_consumer(
+        self, database: Database, clock: FakeClock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Возможность без потребителя не создаётся, но проход выполняется.
+
+        Иначе находка осталась бы в состоянии CREATED навсегда. Журнал при
+        этом показывает, какая сделка состоялась бы, — это и есть сухой
+        прогон режима до появления подсистемы исполнения.
+        """
+        configuration = parse_configuration(_stable_document(), environ=dict(VALID_ENV)).config
+        harness = build_harness(configuration, database, clock)
+        harness.scanner._dispatch_modes = frozenset({ScanMode.UR, ScanMode.FEST})
+
+        with caplog.at_level("INFO", logger="monik.services.level1.scanner"):
+            result = (await harness.scanner.scan_all(ScanMode.ANN))[0]
+
+        assert result.opportunities == ()
+        assert not harness.dispatcher.submitted
+        observed = [
+            r for r in caplog.records if r.getMessage() == "opportunity observed without a consumer"
+        ]
+        assert observed, "проход обязан сообщить, что он нашёл бы"
+        fields = observed[0].monik_fields
+        assert fields["mode"] == "ann"
+        assert Decimal(fields["net_profit"]) > 0
+
+    async def test_the_reported_amount_is_the_most_profitable_one(
+        self, database: Database, clock: FakeClock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Выбирается сумма с наибольшим заработком, а не с наибольшим процентом.
+
+        Курс у тестовых адаптеров одинаков для всех сумм, поэтому больший
+        заработок даёт большая сумма — на ней и должен остановиться выбор.
+        """
+        configuration = parse_configuration(_stable_document(), environ=dict(VALID_ENV)).config
+        harness = build_harness(configuration, database, clock)
+        harness.scanner._dispatch_modes = frozenset({ScanMode.UR})
+
+        with caplog.at_level("INFO", logger="monik.services.level1.scanner"):
+            await harness.scanner.scan_all(ScanMode.ANN)
+
+        fields = (
+            next(
+                r
+                for r in caplog.records
+                if r.getMessage() == "opportunity observed without a consumer"
+            )
+        ).monik_fields
+        # Лучшая по заработку сумма — большая из проверенных.
+        assert Decimal(fields["amount"]) == Decimal(100)

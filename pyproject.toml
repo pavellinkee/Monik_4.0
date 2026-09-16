@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.9,<3",
     "PyYAML>=6,<7",
     "aiosqlite>=0.20,<1",
+    "eth-account>=0.13,<1",
 ]
 
 [project.scripts]

@@ -23,6 +23,7 @@ from monik.config.secrets import SecretValue
 from monik.config.sections.fees import GasSource, PriceSource
 from monik.config.sections.providers import ProviderConfig
 from monik.domain.enums.lifecycle import AmountConfirmationStatus
+from monik.domain.enums.modes import ScanMode
 from monik.domain.enums.notifications import DestinationKind
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import ConfigurationError
@@ -720,6 +721,10 @@ def _build_level1(
         sequences=repositories.sequences,
         dispatcher=dispatcher,
         clock=clock,
+        # Найденное режимами ur и fest потребляет Level 2. У торгового
+        # режима ann потребителем будет подсистема исполнения; пока её
+        # нет, его находки только записываются в журнал.
+        dispatch_modes=frozenset({ScanMode.UR, ScanMode.FEST}),
         metrics=metrics,
     )
 

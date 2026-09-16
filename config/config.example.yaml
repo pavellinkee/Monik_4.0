@@ -164,6 +164,12 @@ scanner:
     fest:
       enabled: false
       interval_seconds: 30
+    # ann — торговый проход: сканирует все суммы сразу, выбирает лучшую по
+    # заработку в базовом токене и исполняет сделку сам
+    # (the_main_rules.md, правило 11).
+    ann:
+      enabled: false
+      interval_seconds: 30
 
   level1:
     # Сумма поиска. Если не задана — наименьшая из amounts.
@@ -194,6 +200,7 @@ profitability:
   thresholds:
     ur: "1.00"
     fest: "1.00"
+    ann: "1.00"
 
 fees:
   enabled: true

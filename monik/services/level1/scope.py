@@ -47,15 +47,21 @@ class ScopeBuilder:
         self._providers = providers
         self._clock = clock
 
-    def scan_networks(self) -> tuple[NetworkId, ...]:
+    def scan_networks(self, mode: ScanMode | None = None) -> tuple[NetworkId, ...]:
         """Сети, которые сканируются в этом такте.
 
         Выключенная сеть не участвует в scan (``02_LEVEL1_SCANNER.md``
-        §72), поэтому оператору достаточно снять ``enabled`` у сети —
-        отдельного списка сканируемых сетей не существует и рассогласовать
-        его не с чем.
+        §72), поэтому оператору достаточно снять ``enabled`` у сети.
+        Режим может сузить набор своим списком, но не расширить его:
+        выключенная сеть остаётся выключенной для всех.
         """
-        return tuple(network.network_id for network in self._networks.enabled())
+        enabled = tuple(network.network_id for network in self._networks.enabled())
+        if mode is None:
+            return enabled
+        allowed = self._configuration.scanner.modes.for_mode(mode).networks
+        if allowed is None:
+            return enabled
+        return tuple(network_id for network_id in enabled if network_id in allowed)
 
     def build(self, network_id: NetworkId, mode: ScanMode) -> ScanScope | None:
         """Собрать scope прохода одной сети в заданном режиме.
@@ -81,7 +87,7 @@ class ScopeBuilder:
             networks=(network_id,),
             providers=providers,
             tokens=tuple(token.key for token in tokens),
-            raw_amounts=self._raw_amounts(self._tokens.base_token(network_id)),
+            raw_amounts=self._raw_amounts(self._tokens.base_token(network_id), mode),
         )
 
     def mode_tokens(self, network_id: NetworkId, mode: ScanMode) -> tuple[Token, ...]:
@@ -93,7 +99,7 @@ class ScopeBuilder:
         проход, как только получит метку, без правки списков.
         """
         tokens = self.scan_tokens(network_id)
-        if mode is ScanMode.FEST:
+        if mode in (ScanMode.FEST, ScanMode.ANN):
             return tuple(token for token in tokens if token.usd_stable)
         return tokens
 
@@ -121,13 +127,20 @@ class ScopeBuilder:
         """Базовый токен сети: вход и выход round-trip (``10_LEVEL_1_SCANNER.md`` §37)."""
         return self._tokens.base_token(network_id)
 
-    def _raw_amounts(self, base_token: Token) -> tuple[int, ...]:
-        """Сумма поиска в base units базового токена сети.
+    def _raw_amounts(self, base_token: Token, mode: ScanMode) -> tuple[int, ...]:
+        """Суммы прохода в base units базового токена сети.
 
-        Поиск ведётся одной суммой: стоимость этапа не должна расти
-        вместе с числом сумм, которые предстоит проверить Level 2
-        (``the_main_rules.md``, правило 1). Пересчёт делается для каждой
-        сети отдельно — знаки базового токена у сетей могут различаться.
+        Режимы ``ur`` и ``fest`` ищут **одной** суммой: стоимость поиска
+        не должна расти вместе с числом сумм, которые предстоит проверить
+        Level 2 (``the_main_rules.md``, правило 1).
+
+        Режим ``ann`` проверяет **все** суммы сразу (правило 11): он не
+        передаёт находку на второй этап, а исполняет её сам, и размер
+        сделки — часть решения, а не последующая проверка.
+
+        Пересчёт делается для каждой сети отдельно: знаки базового токена
+        у сетей могут различаться.
         """
-        amount = self._configuration.scanner.level1_amount
-        return (base_token.amount_from_decimal(str(amount)).raw,)
+        scanner = self._configuration.scanner
+        amounts = scanner.amounts if mode is ScanMode.ANN else (scanner.level1_amount,)
+        return tuple(base_token.amount_from_decimal(str(amount)).raw for amount in amounts)

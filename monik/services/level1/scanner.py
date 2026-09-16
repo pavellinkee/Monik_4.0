@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from decimal import Decimal
 
 from monik.config.root import Configuration
 from monik.domain.enums.lifecycle import ScanStatus
@@ -69,6 +70,7 @@ class Level1Scanner:
         sequences: IdSequenceSource,
         dispatcher: Level2Dispatcher,
         clock: Clock,
+        dispatch_modes: frozenset[ScanMode] = frozenset(ScanMode),
         metrics: MetricsRegistry | None = None,
     ) -> None:
         self._configuration = configuration
@@ -81,6 +83,13 @@ class Level1Scanner:
         self._scans = scans
         self._sequences = sequences
         self._dispatcher = dispatcher
+        #: Режимы, у найденного которых есть потребитель. Возможность без
+        #: потребителя не создаётся: она осталась бы в состоянии CREATED
+        #: навсегда и засоряла бы историю. Проход при этом выполняется
+        #: полностью — статистика и лучший результат записываются, — так
+        #: что режим можно наблюдать до того, как появится тот, кто его
+        #: находки обрабатывает.
+        self._dispatch_modes = dispatch_modes
         self._clock = clock
         self._metrics = metrics
 
@@ -97,7 +106,7 @@ class Level1Scanner:
         """
         scopes = (
             self._scope_builder.build(network_id, mode)
-            for network_id in self._scope_builder.scan_networks()
+            for network_id in self._scope_builder.scan_networks(mode)
         )
         return tuple(scope for scope in scopes if scope is not None)
 
@@ -285,7 +294,12 @@ class Level1Scanner:
         qualified = tuple(
             candidate for candidate in candidates if _passes_preliminary_threshold(candidate)
         )
-        groups = rank_groups(group_candidates(qualified))
+        # Торговый режим выбирает по заработку в базовом токене, остальные —
+        # по доходности в процентах.
+        groups = rank_groups(group_candidates(qualified), by_profit=scan.scope.mode is ScanMode.ANN)
+        if scan.scope.mode not in self._dispatch_modes:
+            _log_observed(scan.scope.mode, groups)
+            return (), 0
         guard = DeduplicationGuard(
             self._opportunities,
             window=timedelta(seconds=config.deduplication_window_seconds),
@@ -570,3 +584,39 @@ def _passes_preliminary_threshold(candidate: Candidate) -> bool:
     """
     outcome = candidate.preliminary_result.threshold_outcome
     return outcome is not None and outcome.passed
+
+
+def _log_observed(mode: ScanMode, groups: tuple[CandidateGroup, ...]) -> None:
+    """Записать, что проход **нашёл бы**, не создавая возможности.
+
+    Нужно для наблюдения за режимом, у которого потребителя ещё нет:
+    журнал показывает, какая сделка состоялась бы и с каким заработком,
+    а состояние системы при этом не меняется.
+    """
+    if not groups:
+        return
+    best = groups[0]
+    amounts = [
+        candidate
+        for candidate in best.candidates
+        if candidate.preliminary_result.net_profit is not None
+    ]
+    if not amounts:
+        return
+    winner = max(amounts, key=lambda item: item.preliminary_result.net_profit or Decimal(0))
+    _LOGGER.info(
+        "opportunity observed without a consumer",
+        extra=log_fields(
+            mode=mode.value,
+            token=str(winner.buy_quote.output_token),
+            amount=str(winner.buy_quote.input_amount.as_decimal),
+            route=f"{best.buy_provider_id.value}->{best.sell_provider_id.value}",
+            net_profit=str(winner.preliminary_result.net_profit),
+            net_roi=(
+                None
+                if winner.preliminary_result.net_roi is None
+                else str(winner.preliminary_result.net_roi.value)
+            ),
+            candidates=len(groups),
+        ),
+    )

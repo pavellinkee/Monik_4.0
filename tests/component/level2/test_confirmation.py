@@ -418,7 +418,7 @@ class TestModeThreshold:
                 token["usd_stable"] = True
         document["scanner"]["modes"] = {"fest": {"enabled": True, "interval_seconds": 30}}
         document["scanner"]["level1"] = {"scan_timeout_seconds": 30}
-        document["profitability"] = {"thresholds": {"ur": ur, "fest": fest}}
+        document["profitability"] = {"thresholds": {"ur": ur, "fest": fest, "ann": ur}}
         return document
 
     async def test_fest_opportunity_is_confirmed_by_the_fest_threshold(

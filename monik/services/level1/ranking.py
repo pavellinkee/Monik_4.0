@@ -39,8 +39,29 @@ def _best_net_profit(group: CandidateGroup) -> Decimal:
     return max(values) if values else _NO_METRIC
 
 
-def rank_groups(groups: tuple[CandidateGroup, ...]) -> tuple[CandidateGroup, ...]:
-    """Отсортировать группы по убыванию привлекательности."""
+def rank_groups(
+    groups: tuple[CandidateGroup, ...], *, by_profit: bool = False
+) -> tuple[CandidateGroup, ...]:
+    """Отсортировать группы по убыванию привлекательности.
+
+    ``by_profit`` меняет главный критерий с доходности в процентах на
+    абсолютную прибыль в базовом токене. Это нужно торговому режиму:
+    когда проход сканирует несколько сумм сразу, выбирать надо ту, что
+    даёт больше денег, а не больший процент — процент на малой сумме
+    может быть выше, а заработок меньше (``the_main_rules.md``,
+    правило 11).
+    """
+    if by_profit:
+        return tuple(
+            sorted(
+                groups,
+                key=lambda group: (
+                    -_best_net_profit(group),
+                    -_best_net_roi(group),
+                    group.group_key,
+                ),
+            )
+        )
     return tuple(
         sorted(
             groups,

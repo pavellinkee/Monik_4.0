@@ -58,6 +58,12 @@ def configuration_diagnostics(loaded: LoadedConfiguration) -> dict[str, Any]:
                 "enabled": config.scanner.modes.for_mode(mode).enabled,
                 "interval_seconds": config.scanner.modes.for_mode(mode).interval_seconds,
                 "threshold_percent": str(config.profitability.threshold_for(mode)),
+                "networks": [
+                    str(network.network_id)
+                    for network in config.enabled_networks
+                    if (allowed := config.scanner.modes.for_mode(mode).networks) is None
+                    or network.network_id in allowed
+                ],
                 "providers": [
                     provider.provider_id.value
                     for provider in config.enabled_providers

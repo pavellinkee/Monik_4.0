@@ -58,7 +58,7 @@ class TestEnvironmentOverrides:
         политика, а не значение по умолчанию, поэтому оба режима названы
         явно.
         """
-        document["profitability"] = {"thresholds": {"ur": "1.00", "fest": "1.00"}}
+        document["profitability"] = {"thresholds": {"ur": "1.00", "fest": "1.00", "ann": "1.00"}}
         env["MONIK__PROFITABILITY__THRESHOLDS__UR"] = "1.25"
         threshold = _load(document, env).profitability.threshold_for(ScanMode.UR)
         assert threshold == Decimal("1.25")
