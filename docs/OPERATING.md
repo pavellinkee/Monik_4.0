@@ -112,9 +112,10 @@ Environment=MONIK__APPLICATION__ENVIRONMENT=production
 
 ```
 /home/ubuntu/claude_monik/
-├── monik_3.3/          предыдущее состояние, версия отката
-├── monik_3.4/          текущее
-└── current -> monik_3.4
+├── monik_3.4/          старые состояния
+├── monik_3.5/          версия отката
+├── monik_4.0/          текущее
+└── current -> monik_4.0
 ```
 
 Действующий юнит хранится в репозитории как `docs/monik.service` — копия
@@ -122,7 +123,7 @@ Environment=MONIK__APPLICATION__ENVIRONMENT=production
 содержит номера версии и **не редактируется при обновлении**. Переход на новое состояние — перенос ссылки и перезапуск:
 
 ```bash
-ln -sfn monik_3.5 /home/ubuntu/claude_monik/current
+ln -sfn monik_4.0 /home/ubuntu/claude_monik/current
 sudo systemctl restart monik
 ```
 
@@ -135,22 +136,29 @@ sudo systemctl restart monik
 окружение:
 
 ```bash
-cd /home/ubuntu/claude_monik/monik_3.5 && make install
+cd /home/ubuntu/claude_monik/monik_4.0 && make install
 ```
 
-**База данных принадлежит состоянию.** Путь `database.path` задан
-относительно рабочего каталога, поэтому у каждого состояния своя база
-внутри его каталога. Откат возвращает и код, и базу того состояния —
-миграции новой версии старую базу не затрагивают. Плата за это —
-накопленная статистика не переезжает: новое состояние начинает историю
-сканов с нуля.
+**База данных живёт вне состояний** — в `/var/lib/monik/monik.db`. Она
+одна на все версии, поэтому накопленная история сканов и возможностей
+переезжает вместе с переходом на новое состояние и сохраняется при
+откате.
+
+Плата за это — миграции. Новая версия применяет свои миграции к общей
+базе, и откат на прежнее состояние получает базу уже новой схемы.
+Прежний код обычно её читает — миграции только добавляют колонки, — но
+перед переходом на состояние с миграциями базу следует скопировать:
+
+```bash
+sudo cp /var/lib/monik/monik.db /var/lib/monik/monik.db.before-<версия>
+```
 
 **Проверка перед переносом ссылки.** Конфигурацию нового состояния можно
 проверить, не останавливая работающую службу:
 
 ```bash
-sudo -u ubuntu /home/ubuntu/claude_monik/monik_3.5/.venv/bin/monik \
-  --config /home/ubuntu/claude_monik/monik_3.5/config/config.yaml --check-config
+sudo -u ubuntu /home/ubuntu/claude_monik/monik_4.0/.venv/bin/monik \
+  --config /home/ubuntu/claude_monik/monik_4.0/config/config.yaml --check-config
 ```
 
 Секреты служба получает от systemd: `EnvironmentFile=/etc/monik/monik.env`
