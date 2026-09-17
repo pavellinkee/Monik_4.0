@@ -3,25 +3,29 @@
 from __future__ import annotations
 
 from monik.domain.enums.base import DomainEnum
+from monik.domain.enums.modes import ScanMode
+from monik.domain.enums.operations import OperationType
 
 
 class RequestPriority(DomainEnum):
     """Приоритет запроса к внешнему ресурсу.
 
-    Правило приоритета принадлежит **режиму**, а не системе целиком
-    (``the_main_rules.md``, правило 13): у режимов разный состав работы, и
-    общего порядка для них не существует.
+    Порядок задаётся двумя правилами, и первое сильнее второго
+    (``the_main_rules.md``, правило 13).
 
-    ``ur`` и ``fest`` ищут и подтверждают, поэтому их порядок прежний
-    (``CLAUDE.md`` §15, ``05_RESOURCE_MANAGER.md`` §16-20):
+    **Между режимами**: ``ann`` > ``fest`` > ``ur``. Вся работа торгового
+    режима обслуживается раньше любой работы ``fest``, а вся работа
+    ``fest`` — раньше любой работы ``ur``.
 
-    ``LEVEL2`` > ``LEVEL1_SELL`` > ``LEVEL1_BUY``.
+    **Внутри режима** порядок свой, потому что состав работы у режимов
+    разный. ``ur`` и ``fest`` ищут и подтверждают:
 
-    У ``ann`` нет ни Level 1, ни Level 2. У него три занятия — продажа,
-    покупка и сканирование, — и порядок между ними обратен их
-    последовательности во времени:
+    ``Level 2`` > ``Level 1 SELL`` > ``Level 1 BUY``.
 
-    ``ANN_SELL`` > ``ANN_BUY`` > ``ANN_SCAN``.
+    У ``ann`` нет ни Level 1, ни Level 2. У него три занятия, и порядок
+    между ними обратен их последовательности во времени:
+
+    ``продажа`` > ``покупка`` > ``сканирование``.
 
     Продажа первая, потому что за ней стоят уже потраченные деньги:
     задержка держит купленный токен дольше, чем живёт отклонение, ради
@@ -29,26 +33,38 @@ class RequestPriority(DomainEnum):
     рискует ими. Сканирование последнее — уступив очередь, оно теряет
     один цикл и найдёт то же самое через десять секунд.
 
-    Между режимами продажа и покупка ``ann`` стоят выше всего: это
-    единственная работа, чья задержка стоит денег. Сканирование ``ann``,
-    наоборот, поставлено **ниже** поиска ``ur`` и ``fest`` — так их
-    обслуживание остаётся ровно таким, каким было до появления ``ann``.
+    ``MAINTENANCE`` и ``BACKGROUND`` режиму не принадлежат и стоят ниже
+    всех: обслуживание и доставка уведомлений подождут.
 
     Прибыльность возможности **не** влияет на приоритет
     (``04_SCHEDULER.md`` §26): выше ставится род работы, а не её ожидаемый
     доход.
+
+    Приоритет назван целиком, а не парой «режим + работа», намеренно:
+    значение путешествует через адаптеры провайдеров как одно поле, и
+    новый агрегатор не может забыть передать вторую половину.
     """
 
-    #: Продажа режима ``ann``: котировка выхода, сборка, проверка узлом,
-    #: отправка и квитанция.
+    # --- ann: торговый режим, самый приоритетный ------------------------
+    #: Продажа: котировка выхода, сборка, проверка узлом, отправка,
+    #: квитанция.
     ANN_SELL = "ann_sell"
-    #: Покупка режима ``ann``: всё то же самое для входа в сделку.
+    #: Покупка: то же самое для входа в сделку.
     ANN_BUY = "ann_buy"
-    LEVEL2 = "level2"
-    LEVEL1_SELL = "level1_sell"
-    LEVEL1_BUY = "level1_buy"
-    #: Сканирование режима ``ann``.
+    #: Сканирование торгового режима.
     ANN_SCAN = "ann_scan"
+
+    # --- fest: частый проход по стейблкоинам ----------------------------
+    FEST_LEVEL2 = "fest_level2"
+    FEST_LEVEL1_SELL = "fest_level1_sell"
+    FEST_LEVEL1_BUY = "fest_level1_buy"
+
+    # --- ur: основной проход, самый низкий из режимов -------------------
+    UR_LEVEL2 = "ur_level2"
+    UR_LEVEL1_SELL = "ur_level1_sell"
+    UR_LEVEL1_BUY = "ur_level1_buy"
+
+    # --- работа, не принадлежащая режиму --------------------------------
     MAINTENANCE = "maintenance"
     BACKGROUND = "background"
 
@@ -65,13 +81,57 @@ class RequestPriority(DomainEnum):
 _PRIORITY_RANKS: dict[RequestPriority, int] = {
     RequestPriority.ANN_SELL: 0,
     RequestPriority.ANN_BUY: 1,
-    RequestPriority.LEVEL2: 2,
-    RequestPriority.LEVEL1_SELL: 3,
-    RequestPriority.LEVEL1_BUY: 4,
-    RequestPriority.ANN_SCAN: 5,
-    RequestPriority.MAINTENANCE: 6,
-    RequestPriority.BACKGROUND: 7,
+    RequestPriority.ANN_SCAN: 2,
+    RequestPriority.FEST_LEVEL2: 3,
+    RequestPriority.FEST_LEVEL1_SELL: 4,
+    RequestPriority.FEST_LEVEL1_BUY: 5,
+    RequestPriority.UR_LEVEL2: 6,
+    RequestPriority.UR_LEVEL1_SELL: 7,
+    RequestPriority.UR_LEVEL1_BUY: 8,
+    RequestPriority.MAINTENANCE: 9,
+    RequestPriority.BACKGROUND: 10,
 }
+
+#: Приоритет запроса поиска по режиму и направлению.
+#:
+#: У ``ann`` направления не различаются: сканирование там одно занятие
+#: целиком, и делить его на ноги незачем — обе уступают и покупке, и
+#: продаже.
+_SEARCH_PRIORITIES: dict[tuple[ScanMode, OperationType], RequestPriority] = {
+    (ScanMode.ANN, OperationType.BUY): RequestPriority.ANN_SCAN,
+    (ScanMode.ANN, OperationType.SELL): RequestPriority.ANN_SCAN,
+    (ScanMode.FEST, OperationType.BUY): RequestPriority.FEST_LEVEL1_BUY,
+    (ScanMode.FEST, OperationType.SELL): RequestPriority.FEST_LEVEL1_SELL,
+    (ScanMode.UR, OperationType.BUY): RequestPriority.UR_LEVEL1_BUY,
+    (ScanMode.UR, OperationType.SELL): RequestPriority.UR_LEVEL1_SELL,
+}
+
+#: Приоритет подтверждения Level 2 по режиму. ``ann`` сюда не входит:
+#: он исполняет находку сам и на второй этап её не передаёт
+#: (``the_main_rules.md``, правило 11).
+_CONFIRMATION_PRIORITIES: dict[ScanMode, RequestPriority] = {
+    ScanMode.FEST: RequestPriority.FEST_LEVEL2,
+    ScanMode.UR: RequestPriority.UR_LEVEL2,
+}
+
+
+def search_priority(mode: ScanMode, operation: OperationType) -> RequestPriority:
+    """Приоритет запроса поиска в этом режиме."""
+    return _SEARCH_PRIORITIES[(mode, operation)]
+
+
+def confirmation_priority(mode: ScanMode) -> RequestPriority:
+    """Приоритет запроса подтверждения Level 2 в этом режиме.
+
+    Для ``ann`` подтверждения не существует, и подставлять ему чужой
+    приоритет нельзя: у режима, который не доходит до Level 2, его просто
+    нет. Обращение сюда с ``ann`` — ошибка вызывающей стороны, и молчать о
+    ней хуже, чем упасть.
+    """
+    priority = _CONFIRMATION_PRIORITIES.get(mode)
+    if priority is None:
+        raise ValueError(f"mode {mode.value} has no level 2 confirmation")
+    return priority
 
 
 class ResourceState(DomainEnum):

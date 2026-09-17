@@ -199,25 +199,25 @@ class TestResource:
 
     def test_level2_outranks_level1(self) -> None:
         """Level 2 обслуживается раньше Level 1 (CLAUDE.md §15)."""
-        level2 = self._request(RequestPriority.LEVEL2, sequence=99)
-        level1 = self._request(RequestPriority.LEVEL1_BUY, sequence=0)
+        level2 = self._request(RequestPriority.UR_LEVEL2, sequence=99)
+        level1 = self._request(RequestPriority.UR_LEVEL1_BUY, sequence=0)
         assert level2.ordering_key < level1.ordering_key
 
     def test_ready_sell_outranks_pending_buy(self) -> None:
         """Готовая SELL-проверка важнее незавершённой BUY (CLAUDE.md §15)."""
-        sell = self._request(RequestPriority.LEVEL1_SELL, sequence=99)
-        buy = self._request(RequestPriority.LEVEL1_BUY, sequence=0)
+        sell = self._request(RequestPriority.UR_LEVEL1_SELL, sequence=99)
+        buy = self._request(RequestPriority.UR_LEVEL1_BUY, sequence=0)
         assert sell.ordering_key < buy.ordering_key
 
     def test_maintenance_has_lower_priority(self) -> None:
         maintenance = self._request(RequestPriority.MAINTENANCE, sequence=0)
-        level1 = self._request(RequestPriority.LEVEL1_BUY, sequence=99)
+        level1 = self._request(RequestPriority.UR_LEVEL1_BUY, sequence=99)
         assert level1.ordering_key < maintenance.ordering_key
 
     def test_fifo_within_same_priority(self) -> None:
         """Внутри приоритета — порядок постановки (05 §17)."""
-        first = self._request(RequestPriority.LEVEL1_BUY, sequence=1)
-        second = self._request(RequestPriority.LEVEL1_BUY, sequence=2)
+        first = self._request(RequestPriority.UR_LEVEL1_BUY, sequence=1)
+        second = self._request(RequestPriority.UR_LEVEL1_BUY, sequence=2)
         assert first.ordering_key < second.ordering_key
 
     def test_rejects_non_positive_timeout(self) -> None:
@@ -225,7 +225,7 @@ class TestResource:
             ResourceRequest(
                 request_id=RequestId.generate(),
                 key=ResourceKey(provider_id=ProviderId.ONEINCH),
-                priority=RequestPriority.LEVEL2,
+                priority=RequestPriority.UR_LEVEL2,
                 timeout=timedelta(0),
                 created_at=f.NOW,
                 sequence=0,
@@ -284,7 +284,7 @@ class TestSchedulerTask:
             task_id="scan_ur",
             mode=TaskMode.INTERVAL,
             interval=timedelta(minutes=5),
-            priority=RequestPriority.LEVEL1_BUY,
+            priority=RequestPriority.UR_LEVEL1_BUY,
         )
         assert task.interval == timedelta(minutes=5)
 

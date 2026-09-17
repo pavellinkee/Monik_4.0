@@ -138,7 +138,10 @@ class Level2Job(DomainModel):
     k_id: KId
     opportunity_id: OpportunityId
     status: JobStatus
-    priority: RequestPriority = RequestPriority.LEVEL2
+    #: Приоритет обслуживания. Значение по умолчанию — самое низкое из
+    #: подтверждающих: приоритет принадлежит режиму возможности, и если
+    #: его не назвали, занизить безопаснее, чем завысить.
+    priority: RequestPriority = RequestPriority.UR_LEVEL2
     attempt_count: int = Field(default=0, ge=0)
     created_at: UtcDatetime
     updated_at: UtcDatetime

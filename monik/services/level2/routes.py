@@ -16,9 +16,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from monik.domain.enums.capability import CapabilityOperation, CapabilityStatus
+from monik.domain.enums.modes import ScanMode
 from monik.domain.enums.operations import RouteValidationOutcome
 from monik.domain.enums.providers import ProviderId
-from monik.domain.enums.resources import RequestPriority
+from monik.domain.enums.resources import confirmation_priority
 from monik.domain.errors import MonikError
 from monik.domain.models.quote import Quote
 from monik.domain.models.route import Route
@@ -75,6 +76,7 @@ class RouteVerifier:
         input_token: Token,
         output_token: Token,
         input_amount: TokenAmount,
+        mode: ScanMode,
         priority_at: datetime | None = None,
     ) -> RouteCheck:
         """Проверить ногу маршрута и вернуть свежую котировку.
@@ -101,7 +103,9 @@ class RouteVerifier:
             request_id=RequestId.generate(),
             routing_mode=route.routing_mode,
             fixed_route=route,
-            priority=RequestPriority.LEVEL2,
+            # Подтверждение обслуживается по режиму возможности
+            # (``the_main_rules.md``, правило 13).
+            priority=confirmation_priority(mode),
             timeout=self._request_timeout,
             # Проверка, начатая раньше, обслуживается раньше начатой
             # позже (``05_RESOURCE_MANAGER.md`` §17-18).

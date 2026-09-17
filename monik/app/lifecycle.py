@@ -39,8 +39,9 @@ from monik.domain.enums.control import ScannerStopReason
 from monik.domain.enums.health import ApplicationHealthStatus, SupervisorState
 from monik.domain.enums.modes import ScanMode
 from monik.domain.enums.notifications import StartupKind
+from monik.domain.enums.operations import OperationType
 from monik.domain.enums.providers import ProviderId
-from monik.domain.enums.resources import RequestPriority
+from monik.domain.enums.resources import RequestPriority, search_priority
 from monik.domain.enums.scheduler import TaskMode
 from monik.infrastructure.db import Database, MigrationRunner
 from monik.infrastructure.providers.contract import AggregatorAdapter
@@ -395,12 +396,10 @@ def build_application(
                 mode=TaskMode.INTERVAL,
                 interval_seconds=config.scanner.modes.for_mode(mode).interval_seconds,
             ),
-            # Правило приоритета принадлежит режиму: сканирование ann
-            # уступает и его покупке, и его продаже, а поиск ur и fest
-            # остаётся ровно там, где был (``the_main_rules.md``, правило 13).
-            priority=(
-                RequestPriority.ANN_SCAN if mode is ScanMode.ANN else RequestPriority.LEVEL1_BUY
-            ),
+            # Правило приоритета принадлежит режиму (``the_main_rules.md``,
+            # правило 13). Здесь оно только попадает в журнал: очередь
+            # выстраивают сами запросы, а не задача расписания.
+            priority=search_priority(mode, OperationType.BUY),
             timeout=timedelta(seconds=config.scanner.scan_timeout_for(mode)),
         )
     if container.watcher is not None:
@@ -415,7 +414,10 @@ def build_application(
                 mode=TaskMode.INTERVAL,
                 interval_seconds=config.trading.recheck_interval_seconds,
             ),
-            priority=RequestPriority.LEVEL2,
+            # Задача одна на все режимы, поэтому её пометка — самая
+            # низкая из подтверждающих. Настоящий приоритет запроса
+            # берётся у режима возможности, а не отсюда.
+            priority=RequestPriority.UR_LEVEL2,
         )
     registry.register(
         TASK_NOTIFICATIONS,

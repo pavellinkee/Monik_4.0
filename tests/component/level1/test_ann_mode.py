@@ -296,10 +296,10 @@ class TestModePriorities:
         }
         assert asked == {RequestPriority.ANN_SCAN}
 
-    async def test_search_mode_keeps_the_priorities_it_had(
+    async def test_search_mode_asks_with_its_own_priorities(
         self, database: Database, clock: FakeClock
     ) -> None:
-        """У ur ничего не изменилось: SELL по-прежнему обгоняет BUY."""
+        """Внутри ur порядок прежний, но метки теперь его собственные."""
         harness = _harness(self._document(), database, clock)
 
         await harness.scanner.scan_all(ScanMode.UR)
@@ -309,12 +309,33 @@ class TestModePriorities:
             for adapter in harness.adapters.values()
             for request in adapter.quote_calls
         }
-        assert asked <= {RequestPriority.LEVEL1_BUY, RequestPriority.LEVEL1_SELL}
+        assert asked <= {RequestPriority.UR_LEVEL1_BUY, RequestPriority.UR_LEVEL1_SELL}
         assert RequestPriority.ANN_SCAN not in asked
 
-    async def test_trading_scan_yields_to_the_search_modes(
+    async def test_frequent_mode_asks_with_its_own_priorities(
         self, database: Database, clock: FakeClock
     ) -> None:
-        """Обслуживание ur и fest осталось таким, каким было до ann."""
-        assert RequestPriority.ANN_SCAN.rank > RequestPriority.LEVEL1_BUY.rank
-        assert RequestPriority.ANN_SCAN.rank > RequestPriority.LEVEL2.rank
+        """fest помечает свои запросы своими метками, не общими с ur."""
+        document = self._document()
+        document["scanner"]["modes"]["fest"] = {"enabled": True, "interval_seconds": 30}
+        harness = _harness(document, database, clock)
+
+        await harness.scanner.scan_all(ScanMode.FEST)
+
+        asked = {
+            request.priority
+            for adapter in harness.adapters.values()
+            for request in adapter.quote_calls
+        }
+        assert asked <= {RequestPriority.FEST_LEVEL1_BUY, RequestPriority.FEST_LEVEL1_SELL}
+
+    async def test_trading_scan_outranks_every_search_request(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        """Между режимами ann выше fest, а fest выше ur.
+
+        Даже сканирование торгового режима — самое низкое из его трёх
+        занятий — обслуживается раньше подтверждения Level 2 у ur.
+        """
+        assert RequestPriority.ANN_SCAN.rank < RequestPriority.FEST_LEVEL2.rank
+        assert RequestPriority.FEST_LEVEL1_BUY.rank < RequestPriority.UR_LEVEL2.rank

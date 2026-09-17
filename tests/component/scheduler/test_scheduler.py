@@ -51,7 +51,7 @@ def interval_task(
         mode=TaskMode.INTERVAL,
         interval=timedelta(seconds=seconds),
         overlap_policy=overlap,
-        priority=RequestPriority.LEVEL1_BUY,
+        priority=RequestPriority.UR_LEVEL1_BUY,
     )
 
 

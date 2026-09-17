@@ -39,8 +39,6 @@ from monik.services.level1.ports import (
 )
 from monik.services.level1.preliminary import PreliminaryEvaluator
 from monik.services.level1.quotes import (
-    ANN_PRIORITIES,
-    SEARCH_PRIORITIES,
     QuoteCollector,
     QuoteStatistics,
 )
@@ -187,9 +185,9 @@ class Level1Scanner:
             scan_id=scan_id,
             max_age=timedelta(seconds=config.quote_max_age_seconds),
             max_concurrent=config.max_concurrent_requests,
-            # Правило приоритета принадлежит режиму: у торгового прохода
-            # оно своё (``the_main_rules.md``, правило 13).
-            priorities=(ANN_PRIORITIES if scan_scope.mode is ScanMode.ANN else SEARCH_PRIORITIES),
+            # Правило приоритета принадлежит режиму (``the_main_rules.md``,
+            # правило 13), поэтому сборщик знает, в каком режиме работает.
+            mode=scan_scope.mode,
         )
         with log_context(scan_id=str(scan_id)):
             try:

@@ -63,6 +63,7 @@ class AmountVerifier:
             input_token=input_token,
             output_token=intermediate_token,
             input_amount=amount,
+            mode=opportunity.mode,
             priority_at=priority_at,
         )
         if not buy.is_reproduced or buy.quote is None:
@@ -75,6 +76,7 @@ class AmountVerifier:
             output_token=output_token,
             # SELL проверяется именно на текущем BUY output (§16).
             input_amount=current_buy_output,
+            mode=opportunity.mode,
             priority_at=priority_at,
         )
         if not sell.is_reproduced or sell.quote is None:

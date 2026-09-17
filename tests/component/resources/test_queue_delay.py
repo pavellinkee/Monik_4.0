@@ -65,7 +65,7 @@ def _request(
     provider: str,
     *,
     operation: CapabilityOperation = CapabilityOperation.QUOTE_BUY,
-    priority: RequestPriority = RequestPriority.LEVEL1_BUY,
+    priority: RequestPriority = RequestPriority.UR_LEVEL1_BUY,
     sequence: int = 0,
     priority_at: object = None,
 ) -> ResourceRequest:
@@ -312,7 +312,7 @@ class TestOrderIsPreserved:
                     manager.execute(
                         _request(
                             ProviderId.ZERO_X,
-                            priority=RequestPriority.LEVEL2,
+                            priority=RequestPriority.UR_LEVEL2,
                             priority_at=f.NOW,
                             sequence=99,
                         ),
@@ -353,7 +353,7 @@ class TestOrderIsPreserved:
                     manager.execute(
                         _request(
                             ProviderId.VELORA,
-                            priority=RequestPriority.LEVEL2,
+                            priority=RequestPriority.UR_LEVEL2,
                             priority_at=f.NOW + timedelta(seconds=30),
                             sequence=1,
                         ),
@@ -364,7 +364,7 @@ class TestOrderIsPreserved:
                     manager.execute(
                         _request(
                             ProviderId.VELORA,
-                            priority=RequestPriority.LEVEL2,
+                            priority=RequestPriority.UR_LEVEL2,
                             priority_at=f.NOW,
                             sequence=2,
                         ),

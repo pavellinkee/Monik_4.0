@@ -193,14 +193,14 @@ class TestPriority:
         await asyncio.sleep(0)
         low = asyncio.create_task(
             manager.execute(
-                request(priority=RequestPriority.LEVEL1_BUY, sequence=1),
+                request(priority=RequestPriority.UR_LEVEL1_BUY, sequence=1),
                 make("level1"),  # type: ignore[arg-type]
             )
         )
         await asyncio.sleep(0)
         high = asyncio.create_task(
             manager.execute(
-                request(priority=RequestPriority.LEVEL2, sequence=2),
+                request(priority=RequestPriority.UR_LEVEL2, sequence=2),
                 make("level2"),  # type: ignore[arg-type]
             )
         )
@@ -231,14 +231,14 @@ class TestPriority:
         await asyncio.sleep(0)
         buy = asyncio.create_task(
             manager.execute(
-                request(priority=RequestPriority.LEVEL1_BUY, sequence=1),
+                request(priority=RequestPriority.UR_LEVEL1_BUY, sequence=1),
                 make("buy"),  # type: ignore[arg-type]
             )
         )
         await asyncio.sleep(0)
         sell = asyncio.create_task(
             manager.execute(
-                request(priority=RequestPriority.LEVEL1_SELL, sequence=2),
+                request(priority=RequestPriority.UR_LEVEL1_SELL, sequence=2),
                 make("sell"),  # type: ignore[arg-type]
             )
         )

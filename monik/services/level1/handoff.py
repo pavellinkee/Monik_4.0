@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from monik.domain.enums.lifecycle import JobStatus, OpportunityStatus
 from monik.domain.enums.modes import ScanMode
-from monik.domain.enums.resources import RequestPriority
+from monik.domain.enums.resources import confirmation_priority
 from monik.domain.models.job import Level2Job
 from monik.domain.models.opportunity import Opportunity
 from monik.domain.value_objects.identifiers import KId, OpportunityId, ScanId, VId
@@ -102,13 +102,18 @@ class OpportunityHandoff:
         )
 
     async def _build_job(self, opportunity: Opportunity, *, now: UtcDatetime) -> Level2Job:
-        """Job получает приоритет выше нового Level 1 scan (§45)."""
+        """Job получает приоритет выше нового Level 1 scan (§45).
+
+        Приоритет берётся у режима возможности: подтверждение ``fest``
+        обслуживается раньше подтверждения ``ur``
+        (``the_main_rules.md``, правило 13).
+        """
         sequence = await self._sequences.next_value(JOB_SEQUENCE)
         return Level2Job(
             k_id=KId.from_sequence(sequence),
             opportunity_id=opportunity.opportunity_id,
             status=JobStatus.QUEUED,
-            priority=RequestPriority.LEVEL2,
+            priority=confirmation_priority(opportunity.mode),
             created_at=now,
             updated_at=now,
             expires_at=now + self._job_ttl,

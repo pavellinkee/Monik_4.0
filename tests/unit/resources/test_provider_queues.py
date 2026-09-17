@@ -260,7 +260,7 @@ class TestSharedBudget:
         manager = ResourceManager(resource_config(), clock, sleeper=sleeper, rng=rng)
         _register_provider_limits(_configuration(), manager)  # type: ignore[arg-type]
 
-        priorities = (RequestPriority.LEVEL1_BUY, RequestPriority.LEVEL2)
+        priorities = (RequestPriority.UR_LEVEL1_BUY, RequestPriority.UR_LEVEL2)
         for index in range(12):
             await manager.execute(
                 request(provider=ProviderId.ZERO_X, priority=priorities[index % 2]),
@@ -310,13 +310,16 @@ class TestPriorityOrder:
         later = f.NOW + timedelta(seconds=5)
         # Порядок постановки намеренно обратный ожидаемому.
         queued = [
-            ("l1_buy", request(provider=ProviderId.ZERO_X, priority=RequestPriority.LEVEL1_BUY)),
-            ("l1_sell", request(provider=ProviderId.ZERO_X, priority=RequestPriority.LEVEL1_SELL)),
+            ("l1_buy", request(provider=ProviderId.ZERO_X, priority=RequestPriority.UR_LEVEL1_BUY)),
+            (
+                "l1_sell",
+                request(provider=ProviderId.ZERO_X, priority=RequestPriority.UR_LEVEL1_SELL),
+            ),
             (
                 "l2_later",
                 request(
                     provider=ProviderId.ZERO_X,
-                    priority=RequestPriority.LEVEL2,
+                    priority=RequestPriority.UR_LEVEL2,
                     priority_at=later,
                 ),
             ),
@@ -324,7 +327,7 @@ class TestPriorityOrder:
                 "l2_earlier",
                 request(
                     provider=ProviderId.ZERO_X,
-                    priority=RequestPriority.LEVEL2,
+                    priority=RequestPriority.UR_LEVEL2,
                     priority_at=earlier,
                 ),
             ),
@@ -348,7 +351,7 @@ class TestPriorityOrder:
                 "later_scan",
                 request(
                     provider=ProviderId.ZERO_X,
-                    priority=RequestPriority.LEVEL2,
+                    priority=RequestPriority.UR_LEVEL2,
                     priority_at=f.NOW + timedelta(seconds=10),
                     created_at=f.NOW + timedelta(seconds=10),
                 ),
@@ -357,7 +360,7 @@ class TestPriorityOrder:
                 "earlier_scan",
                 request(
                     provider=ProviderId.ZERO_X,
-                    priority=RequestPriority.LEVEL2,
+                    priority=RequestPriority.UR_LEVEL2,
                     priority_at=f.NOW,
                     created_at=f.NOW + timedelta(seconds=20),
                 ),

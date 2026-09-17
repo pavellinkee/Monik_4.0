@@ -67,9 +67,9 @@ async def test_level2_job_outranks_new_level1_scan(harness: Level1Harness) -> No
     """Job получает более высокий приоритет, чем новый scan (§45, §59)."""
     await harness.scanner.scan_all(ScanMode.UR)
     _, job = harness.dispatcher.submitted[0]
-    assert job.priority is RequestPriority.LEVEL2
-    assert job.priority.rank < RequestPriority.LEVEL1_BUY.rank
-    assert job.priority.rank < RequestPriority.LEVEL1_SELL.rank
+    assert job.priority is RequestPriority.UR_LEVEL2
+    assert job.priority.rank < RequestPriority.UR_LEVEL1_BUY.rank
+    assert job.priority.rank < RequestPriority.UR_LEVEL1_SELL.rank
 
 
 async def test_opportunity_and_job_are_persisted_atomically(harness: Level1Harness) -> None:

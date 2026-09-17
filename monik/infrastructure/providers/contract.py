@@ -65,9 +65,12 @@ class QuoteRequest:
     fixed_route: Route | None = None
     slippage_bps: int | None = None
     correlation_id: CorrelationId | None = None
-    # Приоритет передаётся Resource Manager: Level 2 обслуживается раньше
-    # Level 1 (``CLAUDE.md`` §15).
-    priority: RequestPriority = RequestPriority.LEVEL1_BUY
+    # Приоритет передаётся Resource Manager. Его называет вызывающая
+    # сторона: он принадлежит режиму, а адаптер режима не знает
+    # (``the_main_rules.md``, правило 13). Значение по умолчанию — самое
+    # низкое из поисковых: если приоритет не назвали, занизить безопаснее,
+    # чем завысить чужую очередь.
+    priority: RequestPriority = RequestPriority.UR_LEVEL1_BUY
     timeout: timedelta | None = None
     # Момент начала работы, породившей запрос. Внутри одного приоритета
     # обслуживание идёт по нему, а не по времени создания конкретного

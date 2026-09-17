@@ -78,7 +78,7 @@ def resource_config(**overrides: object) -> ResourceConfig:
 
 def request(
     *,
-    priority: RequestPriority = RequestPriority.LEVEL1_BUY,
+    priority: RequestPriority = RequestPriority.UR_LEVEL1_BUY,
     sequence: int = 0,
     provider: ProviderId = ProviderId.ONEINCH,
     operation: CapabilityOperation | None = None,

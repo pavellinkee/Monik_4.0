@@ -15,10 +15,13 @@ from monik.domain.enums import (
     DomainEnum,
     JobStatus,
     NotificationMode,
+    OperationType,
     OpportunityStatus,
     ProviderId,
     RequestPriority,
+    ScanMode,
 )
+from monik.domain.enums.resources import confirmation_priority, search_priority
 
 #: Значения, зафиксированные архитектурой. Изменять только вместе с migration.
 FROZEN_VALUES: dict[str, set[str]] = {
@@ -98,21 +101,26 @@ def test_provider_set_matches_approved_providers() -> None:
     }
 
 
-def test_search_modes_keep_their_original_order() -> None:
-    """У ``ur`` и ``fest`` порядок прежний (``CLAUDE.md`` §15).
+def test_each_search_mode_keeps_the_order_it_had() -> None:
+    """Внутри ``ur`` и ``fest`` порядок прежний (``CLAUDE.md`` §15).
 
-    Появление торгового режима не должно было его тронуть: правило
-    приоритета принадлежит режиму (``the_main_rules.md``, правило 13).
+    Появление торгового режима и порядка между режимами не должно было
+    его тронуть: правило приоритета принадлежит режиму
+    (``the_main_rules.md``, правило 13).
     """
-    search = [
-        RequestPriority.LEVEL2,
-        RequestPriority.LEVEL1_SELL,
-        RequestPriority.LEVEL1_BUY,
-        RequestPriority.MAINTENANCE,
-        RequestPriority.BACKGROUND,
-    ]
-
-    assert sorted(search, key=lambda p: p.rank) == search
+    for level2, sell, buy in (
+        (
+            RequestPriority.FEST_LEVEL2,
+            RequestPriority.FEST_LEVEL1_SELL,
+            RequestPriority.FEST_LEVEL1_BUY,
+        ),
+        (
+            RequestPriority.UR_LEVEL2,
+            RequestPriority.UR_LEVEL1_SELL,
+            RequestPriority.UR_LEVEL1_BUY,
+        ),
+    ):
+        assert level2.rank < sell.rank < buy.rank
 
 
 def test_trading_mode_orders_sell_before_buy_before_scanning() -> None:
@@ -131,32 +139,56 @@ def test_trading_mode_orders_sell_before_buy_before_scanning() -> None:
     assert sorted(ann, key=lambda p: p.rank) == ann
 
 
-def test_trading_requests_outrank_every_search_request() -> None:
-    """Любой запрос продажи и покупки обгоняет любой поисковый."""
-    search = (
-        RequestPriority.LEVEL2,
-        RequestPriority.LEVEL1_SELL,
-        RequestPriority.LEVEL1_BUY,
-    )
+def test_modes_are_ordered_ann_then_fest_then_ur() -> None:
+    """Правило между режимами сильнее правила внутри режима.
 
-    for trading in (RequestPriority.ANN_SELL, RequestPriority.ANN_BUY):
-        assert all(trading.rank < other.rank for other in search)
-
-
-def test_trading_scan_never_delays_the_search_modes() -> None:
-    """Сканирование ``ann`` поставлено ниже поиска ``ur`` и ``fest``.
-
-    Так их обслуживание остаётся ровно таким, каким было до появления
-    торгового режима.
+    Вся работа ``ann`` обслуживается раньше любой работы ``fest``, вся
+    работа ``fest`` — раньше любой работы ``ur``. Даже подтверждение
+    Level 2 более низкого режима уступает сканированию более высокого.
     """
-    assert all(
-        RequestPriority.ANN_SCAN.rank > other.rank
-        for other in (
-            RequestPriority.LEVEL2,
-            RequestPriority.LEVEL1_SELL,
-            RequestPriority.LEVEL1_BUY,
-        )
+    ann = (RequestPriority.ANN_SELL, RequestPriority.ANN_BUY, RequestPriority.ANN_SCAN)
+    fest = (
+        RequestPriority.FEST_LEVEL2,
+        RequestPriority.FEST_LEVEL1_SELL,
+        RequestPriority.FEST_LEVEL1_BUY,
     )
+    ur = (
+        RequestPriority.UR_LEVEL2,
+        RequestPriority.UR_LEVEL1_SELL,
+        RequestPriority.UR_LEVEL1_BUY,
+    )
+
+    assert max(p.rank for p in ann) < min(p.rank for p in fest)
+    assert max(p.rank for p in fest) < min(p.rank for p in ur)
+
+
+def test_work_outside_the_modes_comes_last() -> None:
+    """Обслуживание и доставка уведомлений уступают любому режиму."""
+    modes = [p for p in RequestPriority if p.value.startswith(("ann_", "fest_", "ur_"))]
+
+    assert max(p.rank for p in modes) < RequestPriority.MAINTENANCE.rank
+    assert RequestPriority.MAINTENANCE.rank < RequestPriority.BACKGROUND.rank
+
+
+def test_search_priority_is_chosen_by_mode_and_direction() -> None:
+    """``ann`` ног не различает: сканирование там одно занятие целиком."""
+    assert search_priority(ScanMode.UR, OperationType.SELL) is RequestPriority.UR_LEVEL1_SELL
+    assert search_priority(ScanMode.FEST, OperationType.BUY) is RequestPriority.FEST_LEVEL1_BUY
+    assert search_priority(ScanMode.ANN, OperationType.BUY) is RequestPriority.ANN_SCAN
+    assert search_priority(ScanMode.ANN, OperationType.SELL) is RequestPriority.ANN_SCAN
+
+
+def test_trading_mode_has_no_confirmation_priority() -> None:
+    """``ann`` исполняет находку сам и до Level 2 не доходит.
+
+    Подставлять ему чужой приоритет нельзя: у режима, которого на втором
+    этапе не бывает, его просто нет.
+    """
+    assert confirmation_priority(ScanMode.UR) is RequestPriority.UR_LEVEL2
+    assert confirmation_priority(ScanMode.FEST) is RequestPriority.FEST_LEVEL2
+
+    with pytest.raises(ValueError, match="no level 2 confirmation"):
+        confirmation_priority(ScanMode.ANN)
 
 
 def test_priority_ranks_are_unique() -> None:

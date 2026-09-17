@@ -88,7 +88,7 @@ def _request(
     provider: ProviderId,
     *,
     operation: CapabilityOperation,
-    priority: RequestPriority = RequestPriority.LEVEL1_BUY,
+    priority: RequestPriority = RequestPriority.UR_LEVEL1_BUY,
     sequence: int = 0,
     priority_at: object = None,
 ) -> ResourceRequest:
@@ -108,8 +108,8 @@ def _level1_requests() -> list[ResourceRequest]:
     requests: list[ResourceRequest] = []
     sequence = 0
     for operation, priority in (
-        (CapabilityOperation.QUOTE_BUY, RequestPriority.LEVEL1_BUY),
-        (CapabilityOperation.QUOTE_SELL, RequestPriority.LEVEL1_SELL),
+        (CapabilityOperation.QUOTE_BUY, RequestPriority.UR_LEVEL1_BUY),
+        (CapabilityOperation.QUOTE_SELL, RequestPriority.UR_LEVEL1_SELL),
     ):
         for provider in RATES:
             for _token in range(TOKENS):
@@ -276,7 +276,7 @@ class TestLevel2Preemption:
                 _request(
                     provider,
                     operation=CapabilityOperation.QUOTE_BUY,
-                    priority=RequestPriority.LEVEL1_BUY,
+                    priority=RequestPriority.UR_LEVEL1_BUY,
                     sequence=index,
                 ),
                 recorder.operation(provider, f"l1-{index}"),
@@ -291,7 +291,7 @@ class TestLevel2Preemption:
                 _request(
                     provider,
                     operation=CapabilityOperation.QUOTE_BUY,
-                    priority=RequestPriority.LEVEL2,
+                    priority=RequestPriority.UR_LEVEL2,
                     priority_at=f.NOW,
                     sequence=999,
                 ),
@@ -325,7 +325,7 @@ class TestLevel2Preemption:
                 _request(
                     provider,
                     operation=CapabilityOperation.QUOTE_BUY,
-                    priority=RequestPriority.LEVEL2,
+                    priority=RequestPriority.UR_LEVEL2,
                     priority_at=started_at,
                     sequence=sequence,
                 ),
