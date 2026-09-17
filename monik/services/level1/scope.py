@@ -136,11 +136,13 @@ class ScopeBuilder:
 
         Режим ``ann`` проверяет **все** суммы сразу (правило 11): он не
         передаёт находку на второй этап, а исполняет её сам, и размер
-        сделки — часть решения, а не последующая проверка.
+        сделки — часть решения, а не последующая проверка. Суммы берутся
+        его собственные, если заданы: торговый проход ограничен остатком
+        счёта, а суммы проверки Level 2 — вопрос анализа.
 
         Пересчёт делается для каждой сети отдельно: знаки базового токена
         у сетей могут различаться.
         """
         scanner = self._configuration.scanner
-        amounts = scanner.amounts if mode is ScanMode.ANN else (scanner.level1_amount,)
+        amounts = scanner.amounts_for(mode) if mode is ScanMode.ANN else (scanner.level1_amount,)
         return tuple(base_token.amount_from_decimal(str(amount)).raw for amount in amounts)

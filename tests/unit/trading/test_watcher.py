@@ -23,6 +23,7 @@ from monik.services.observability import FakeClock
 from monik.services.trading import PositionWatcher, TradeExecutor, TradingWallet
 from tests import factories as f
 from tests.unit.trading.support import (
+    FixedCosts,
     MemoryPositions,
     MemorySequences,
     ScriptedNode,
@@ -46,10 +47,21 @@ def _position(**overrides: object) -> Position:
         "sell_provider_id": ProviderId.UNISWAP,
         "raw_input": 50_000_000,
         "raw_acquired": ACQUIRED,
+        # Купленная позиция знает, во что обошлась её покупка: расход
+        # приходит квитанцией вместе с ценой. Без этого знания круг
+        # посчитать не из чего, и выход откладывается.
+        "buy_gas_wei": 180_000 * 30_000_000_000,
+        "sell_gas_wei": 0,
         "opened_at": f.NOW,
     }
     base.update(overrides)
     return Position(**base)  # type: ignore[arg-type]
+
+
+#: Стоимость круга в стенде: 0.005 USDT. Величина заметная, но меньше
+#: прибыли, на которой построены проверки выхода, — поэтому она их не
+#: переворачивает, а там, где расход решает исход, он задаётся явно.
+COSTS_RAW = 5_000
 
 
 def _watcher(
@@ -58,6 +70,8 @@ def _watcher(
     *,
     clock: FakeClock | None = None,
     min_exit_profit_raw: int = 10_000,
+    min_exit_profit_waiting_raw: int | None = None,
+    costs: FixedCosts | None = None,
     sell_rate: str = "10.00",
     long_wait_enabled: bool = True,
     long_wait_seconds: int = 7_200,
@@ -86,8 +100,14 @@ def _watcher(
         account=account,
         sender=sender,
         executor=executor,
+        costs=costs or FixedCosts(COSTS_RAW),
         clock=active,
         min_exit_profit_raw=min_exit_profit_raw,
+        min_exit_profit_waiting_raw=(
+            min_exit_profit_raw
+            if min_exit_profit_waiting_raw is None
+            else min_exit_profit_waiting_raw
+        ),
         slippage_bps=10,
         long_wait_enabled=long_wait_enabled,
         long_wait_seconds=long_wait_seconds,
@@ -243,7 +263,11 @@ class TestRecovery:
         positions = MemoryPositions()
         watcher = _watcher(node, positions)
         await positions.create(
-            _position(status=PositionStatus.SELLING, sell_tx_hash="0x" + "ef" * 32)
+            _position(
+                status=PositionStatus.SELLING,
+                sell_tx_hash="0x" + "ef" * 32,
+                raw_base_before_sell=0,
+            )
         )
 
         await watcher.tick()
@@ -317,3 +341,172 @@ class TestImmediateExit:
 def _ann_result():  # noqa: ANN202
     """Находка режима ann, на которую исполнитель откроет сделку."""
     return _result(_candidate(50_000_000, "0.1"))
+
+
+class TestCosts:
+    """Газ — расход сделки, а не фон.
+
+    Он платится в обе стороны и от суммы не зависит, поэтому на малых
+    суммах решает исход: круг, выигравший на цене меньше, чем стоила
+    пара транзакций, приносит убыток. Сравнивать с порогом одну разницу
+    токенов означало бы закрывать сделки в минус, считая их прибыльными.
+    """
+
+    #: 5 AAVE по курсу 10.0024 дают 50.012 USDT: разница токенов 0.012.
+    NARROW_RATE = "10.0024"
+
+    async def test_gas_is_subtracted_before_the_target_is_checked(self) -> None:
+        """0.012 разницы минус 0.005 газа — до цели в 0.01 не хватает."""
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate=self.NARROW_RATE)
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert not node.sent, "без учёта газа сделка выглядела бы прибыльной"
+        assert positions.items["#T1"].status is PositionStatus.HOLDING
+
+    async def test_the_same_circle_sells_when_gas_is_cheap(self) -> None:
+        """Тот же круг при дешёвом газе цель проходит.
+
+        Проверка парная к предыдущей: она показывает, что решение
+        изменил именно расход, а не сама котировка.
+        """
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate=self.NARROW_RATE, costs=FixedCosts(1_000))
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert node.sent, "0.012 минус 0.001 цель в 0.01 проходит"
+
+    async def test_unknown_cost_does_not_sell(self) -> None:
+        """Неизвестный расход нулём не считается (``CLAUDE.md`` §12)."""
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate="10.1", costs=FixedCosts(None))
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert not node.sent
+        assert positions.items["#T1"].status is PositionStatus.HOLDING
+
+    async def test_unknown_buy_gas_does_not_sell(self) -> None:
+        """Стоимость круга неполна, пока неизвестна стоимость покупки."""
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate="10.1")
+        await positions.create(_position(buy_gas_wei=None))
+
+        await watcher.tick()
+
+        assert not node.sent
+
+    async def test_costs_are_not_computed_for_a_hopeless_circle(self) -> None:
+        """Лишних запросов не делается.
+
+        Круг, не окупающий себя даже без газа, с газом тем более убыточен.
+        Собирать ради него транзакцию и спрашивать цену газа незачем.
+        """
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        costs = FixedCosts(COSTS_RAW)
+        watcher = _watcher(node, positions, sell_rate="9.0", costs=costs)
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert costs.calls == [], "стоимость безнадёжного круга не считалась"
+
+    async def test_a_reverted_sale_keeps_the_gas_it_burned(self) -> None:
+        """Неудачная попытка выхода тоже стоила денег."""
+        node = ScriptedNode(receipt_ok=False)
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate="10.1")
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        position = positions.items["#T1"]
+        assert position.status is PositionStatus.HOLDING
+        assert position.sell_gas_wei == 180_000 * 30_000_000_000
+
+
+class TestWaitingThreshold:
+    """У сделки, ушедшей в ожидание, порог ниже.
+
+    Решение оператора: сразу после покупки действует основной порог —
+    шанс выйти в плюс наивысший именно тогда. Если момент упущен, деньги
+    заперты в позиции, и выйти из них выгоднее, чем ждать прежней
+    прибыли неопределённо долго.
+    """
+
+    RATE = "10.0024"
+
+    async def test_immediate_check_holds_out_for_the_higher_target(self) -> None:
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(
+            node,
+            positions,
+            sell_rate=self.RATE,
+            min_exit_profit_raw=10_000,
+            min_exit_profit_waiting_raw=5_000,
+        )
+        position = _position()
+        await positions.create(position)
+
+        await watcher.consider_now(position)
+
+        assert not node.sent, "0.007 чистыми меньше основной цели в 0.01"
+
+    async def test_waiting_trade_settles_for_less(self) -> None:
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(
+            node,
+            positions,
+            sell_rate=self.RATE,
+            min_exit_profit_raw=10_000,
+            min_exit_profit_waiting_raw=5_000,
+        )
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert node.sent, "0.007 чистыми проходит пониженную цель в 0.005"
+        assert positions.items["#T1"].status is PositionStatus.CLOSED
+
+
+class TestProceeds:
+    """Итог сделки — выручка продажи, а не остаток счёта.
+
+    На счёте лежат и деньги, к этой сделке отношения не имеющие. Если
+    считать итогом весь остаток, каждая сделка «зарабатывает» всё, что
+    было на кошельке до неё.
+    """
+
+    async def test_result_is_the_sale_proceeds_not_the_whole_balance(self) -> None:
+        node = ScriptedNode(
+            # До продажи на счёте лежало 10 USDT, не относящихся к сделке.
+            balances={str(f.USDT.address).lower(): 10_000_000},
+            # После продажи стало 60.5: выручка — 50.5, а не 60.5.
+            after_send={str(f.USDT.address).lower(): 60_500_000},
+        )
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate="10.1")
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        position = positions.items["#T1"]
+        assert position.status is PositionStatus.CLOSED
+        assert position.raw_base_before_sell == 10_000_000
+        assert position.raw_returned == 50_500_000
+        assert position.gross_result_raw == 500_000
+        # Чистый итог меньше валового ровно на стоимость круга.
+        assert position.raw_gas_cost == COSTS_RAW
+        assert position.net_result_raw == 500_000 - COSTS_RAW

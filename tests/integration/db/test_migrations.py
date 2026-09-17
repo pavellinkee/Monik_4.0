@@ -162,3 +162,15 @@ class TestPositions:
         await MigrationRunner(database).upgrade()
         indexes = await database.fetch_all("PRAGMA index_list(positions)")
         assert any(row["unique"] for row in indexes)
+
+    async def test_cost_columns_exist(self, database: Database) -> None:
+        """Миграция 0005: расходы сделки и остатки до её ног.
+
+        Без остатка до продажи выручку считать не из чего, и итогом
+        оказывался весь остаток счёта. Без стоимости газа «заработок» не
+        является заработком.
+        """
+        await MigrationRunner(database).upgrade()
+        columns = await _columns(database, "positions")
+        assert {"raw_target_before_buy", "raw_base_before_sell"} <= columns
+        assert {"buy_gas_wei", "sell_gas_wei", "raw_gas_cost"} <= columns

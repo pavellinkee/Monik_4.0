@@ -197,11 +197,12 @@ class Level1Scanner:
                 raise
 
     async def _run(self, scan: Scan, scope: ScanScope, collector: QuoteCollector) -> ScanResult:
-        config = self._configuration.scanner.level1
         timed_out = False
         candidates: tuple[Candidate, ...] = ()
         try:
-            async with asyncio.timeout(config.scan_timeout_seconds):
+            # Срок берётся у режима: у частого прохода он свой, иначе
+            # общий срок пришлось бы равнять по самому быстрому режиму.
+            async with asyncio.timeout(self._configuration.scanner.scan_timeout_for(scope.mode)):
                 candidates = await self._collect_candidates(scan, scope, collector)
         except TimeoutError:
             # Общий таймаут цикла (``10_LEVEL_1_SCANNER.md`` §68): уже

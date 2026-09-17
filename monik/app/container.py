@@ -128,6 +128,7 @@ from monik.services.trading import (
     TradingWallet,
     TransactionSender,
 )
+from monik.services.trading.costs import GasCostConverter
 from monik.services.updates import AptSystemUpdater, SystemUpdater
 
 __all__ = ["Container", "Repositories", "build_container"]
@@ -446,12 +447,16 @@ def build_container(
             account=chain_account,
             sender=sender,
             executor=executor,
+            costs=GasCostConverter(tokens=tokens, networks=networks, rates=conversion),
             clock=clock,
             # Порог выхода задан в базовом токене. Сети могут отличаться
             # знаками базового токена, поэтому берётся максимум: занижать
             # порог нельзя, а сети сейчас совпадают.
             min_exit_profit_raw=int(
                 config.trading.min_exit_profit * (10 ** max(base_decimals.values()))
+            ),
+            min_exit_profit_waiting_raw=int(
+                config.trading.min_exit_profit_waiting * (10 ** max(base_decimals.values()))
             ),
             slippage_bps=int(config.trading.slippage_percent * 100),
             long_wait_enabled=config.trading.max_wait_notice_enabled,

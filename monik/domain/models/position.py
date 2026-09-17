@@ -47,8 +47,25 @@ class Position(DomainModel):
     #: покупка не подтверждена: расчётное количество не подставляется —
     #: неизвестное не равно ожидаемому.
     raw_acquired: int | None = None
-    #: Сколько базового токена получено обратно.
+    #: Сколько базового токена получено обратно. Это **выручка продажи**,
+    #: а не остаток счёта: остаток включает деньги, к этой сделке
+    #: отношения не имеющие.
     raw_returned: int | None = None
+
+    #: Остатки до каждой ноги. Хранятся, потому что «сколько пришло»
+    #: считается разностью, а разность нужно уметь досчитать и после
+    #: перезапуска: квитанция может прийти в другом процессе.
+    raw_target_before_buy: int | None = None
+    raw_base_before_sell: int | None = None
+
+    #: Фактическая стоимость каждой ноги в wei native token сети. Берётся
+    #: из квитанции (расход × цена) и потому точна, а не оценочна.
+    buy_gas_wei: int | None = None
+    sell_gas_wei: int | None = None
+    #: Стоимость газа круга, пересчитанная в базовый токен по курсу на
+    #: момент закрытия. ``None`` означает «неизвестна», а не «ноль»:
+    #: подставлять ноль запрещено (``CLAUDE.md`` §12).
+    raw_gas_cost: int | None = None
 
     buy_tx_hash: str | None = None
     sell_tx_hash: str | None = None
@@ -81,8 +98,8 @@ class Position(DomainModel):
         return Decimal(self.raw_input).scaleb(-self.base_token.decimals)
 
     @property
-    def net_result_raw(self) -> int | None:
-        """Итог круга в base units базового токена.
+    def gross_result_raw(self) -> int | None:
+        """Разница токенов круга, **без** стоимости газа.
 
         ``None``, пока круг не завершён: незавершённая сделка не имеет
         результата, и подставлять вместо него ноль нельзя.
@@ -92,6 +109,22 @@ class Position(DomainModel):
         return self.raw_returned - self.raw_input
 
     @property
+    def net_result_raw(self) -> int | None:
+        """Итог круга в base units базового токена, **с учётом газа**.
+
+        Газ — такой же расход сделки, как и разница курсов, и без него
+        «заработок» не является заработком: круг, выигравший на цене
+        меньше, чем стоила пара транзакций, приносит убыток.
+
+        ``None``, если неизвестна хотя бы одна составляющая. Неизвестный
+        расход нулём не считается (``CLAUDE.md`` §12).
+        """
+        gross = self.gross_result_raw
+        if gross is None or self.raw_gas_cost is None:
+            return None
+        return gross - self.raw_gas_cost
+
+    @property
     def net_result(self) -> Decimal | None:
         """Итог круга в человеческих единицах."""
         raw = self.net_result_raw
@@ -99,6 +132,20 @@ class Position(DomainModel):
             return None
         return Decimal(raw).scaleb(-self.base_token.decimals)
 
-    def profit_if_sold_for(self, raw_output: int) -> int:
-        """Каким был бы итог, продай мы сейчас за ``raw_output``."""
-        return raw_output - self.raw_input
+    @property
+    def gross_result(self) -> Decimal | None:
+        """Разница токенов круга в человеческих единицах."""
+        raw = self.gross_result_raw
+        if raw is None:
+            return None
+        return Decimal(raw).scaleb(-self.base_token.decimals)
+
+    def profit_if_sold_for(self, raw_output: int, *, raw_costs: int = 0) -> int:
+        """Каким был бы итог, продай мы сейчас за ``raw_output``.
+
+        ``raw_costs`` — стоимость газа круга в базовом токене. По
+        умолчанию ноль, и это не поблажка: ноль здесь означает «расход
+        учтён снаружи», а вызывающая сторона обязана передать его явно,
+        когда решает, продавать ли.
+        """
+        return raw_output - self.raw_input - raw_costs

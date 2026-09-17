@@ -32,7 +32,7 @@ from monik.services.level1.results import ScanResult
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.registries.tokens import TokenRegistry
-from monik.services.trading.chain import ChainAccount
+from monik.services.trading.chain import ChainAccount, TransactionReceipt
 from monik.services.trading.ports import PositionStore, SequenceSource
 from monik.services.trading.sender import TransactionSender
 
@@ -208,6 +208,14 @@ class TradeExecutor:
             buy_provider_id=candidate.buy_quote.provider_id,
             sell_provider_id=candidate.sell_quote.provider_id,
             raw_input=candidate.buy_quote.input_amount.raw,
+            # Остаток до покупки запоминается сразу: полученное считается
+            # разностью, а досчитать её может уже другой процесс, если
+            # квитанция придёт после перезапуска.
+            raw_target_before_buy=before.raw,
+            # На продажу пока не потрачено ничего, и это знание, а не
+            # пробел: пустое поле означало бы «неизвестно», и стоимость
+            # круга не сошлась бы вовсе.
+            sell_gas_wei=0,
             opened_at=now,
         )
         # Запись делается ДО отправки: иначе перезапуск между отправкой и
@@ -238,9 +246,7 @@ class TradeExecutor:
             # доведёт её. Считать её неудачной нельзя: транзакция может
             # попасть в блок позже.
             return position
-        settled = await self.settle_buy(
-            position, succeeded=receipt.succeeded, before_raw=before.raw
-        )
+        settled = await self.settle_buy(position, succeeded=receipt.succeeded, receipt=receipt)
         if settled.status is PositionStatus.HOLDING and self._check_exit is not None:
             # Не ждём следующего такта расписания: между покупкой и первой
             # проверкой прошло бы до десяти секунд, а отклонение столько
@@ -249,15 +255,22 @@ class TradeExecutor:
         return settled
 
     async def settle_buy(
-        self, position: Position, *, succeeded: bool, before_raw: int | None = None
+        self, position: Position, *, succeeded: bool, receipt: TransactionReceipt | None = None
     ) -> Position:
         """Зафиксировать итог покупки.
 
         Полученное количество берётся **с самого счёта**, а не из
         котировки: исполнение могло дать меньше обещанного, и дальнейшие
-        расчёты должны опираться на факт.
+        расчёты должны опираться на факт. Считается при этом **прирост**
+        остатка, а не сам остаток: на счёте может лежать тот же токен от
+        прошлой сделки, и он к этой отношения не имеет.
+
+        Стоимость газа берётся из той же квитанции — расход и цена
+        приходят вместе с ней, поэтому знание о расходе не стоит ни
+        одного дополнительного запроса.
         """
         now = self._clock.now()
+        gas_wei = None if receipt is None else receipt.gas_cost_wei
         if not succeeded:
             updated = position.model_copy(
                 update={
@@ -265,6 +278,7 @@ class TradeExecutor:
                     "updated_at": now,
                     "closed_at": now,
                     "raw_returned": position.raw_input,
+                    "buy_gas_wei": gas_wei,
                 }
             )
             await self._positions.update(updated)
@@ -274,11 +288,12 @@ class TradeExecutor:
             )
             return updated
         after = await self._account.token_balance(position.target_token)
-        acquired = after.raw - (before_raw or 0)
+        acquired = after.raw - (position.raw_target_before_buy or 0)
         updated = position.model_copy(
             update={
                 "status": PositionStatus.HOLDING,
                 "raw_acquired": max(acquired, 1),
+                "buy_gas_wei": gas_wei,
                 "updated_at": now,
             }
         )

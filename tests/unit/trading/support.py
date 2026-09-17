@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from monik.domain.models.position import Position
+from monik.domain.models.token import Token
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import FakeHttpClient, HttpRequest, HttpResponse
 from monik.services.observability import FakeClock
@@ -48,6 +49,29 @@ class MemoryPositions:
         )
 
 
+class FixedCosts:
+    """Стоимость исполнения, заданная заранее.
+
+    **Test implementation** (``CLAUDE.md`` §10). Настоящий пересчёт газа
+    в базовый токен требует курса native token и проверяется отдельно;
+    здесь важно только само влияние расхода на решение о выходе, поэтому
+    величина задаётся числом.
+
+    ``raw=None`` означает «посчитать не удалось» — случай, в котором
+    продавать нельзя.
+    """
+
+    def __init__(self, raw: int | None = 0) -> None:
+        self.raw = raw
+        self.calls: list[int] = []
+
+    async def to_base_raw(
+        self, network_id: NetworkId, base_token: Token, *, wei: int
+    ) -> int | None:
+        self.calls.append(wei)
+        return self.raw
+
+
 class MemorySequences:
     """Монотонные номера в памяти."""
 
@@ -73,6 +97,7 @@ class ScriptedNode:
         after_send: dict[str, int] | None = None,
         simulation_ok: bool = True,
         receipt_ok: bool | None = True,
+        effective_gas_price: int | None = 30_000_000_000,
     ) -> None:
         self.balances = dict(balances or {})
         #: Остатки, которые узел начинает показывать **после** первой
@@ -82,6 +107,7 @@ class ScriptedNode:
         self.after_send = dict(after_send or {})
         self.simulation_ok = simulation_ok
         self.receipt_ok = receipt_ok
+        self.effective_gas_price = effective_gas_price
         self.sent: list[str] = []
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
@@ -112,13 +138,18 @@ class ScriptedNode:
         if method == "eth_getTransactionReceipt":
             if self.receipt_ok is None:
                 return _ok(None)
-            return _ok(
-                {
-                    "status": "0x1" if self.receipt_ok else "0x0",
-                    "gasUsed": hex(180_000),
-                    "blockNumber": "0x64",
-                }
-            )
+            receipt = {
+                "status": "0x1" if self.receipt_ok else "0x0",
+                "gasUsed": hex(180_000),
+                "blockNumber": "0x64",
+            }
+            # Цена приходит той же квитанцией, поэтому фактическая
+            # стоимость транзакции известна без единого лишнего запроса.
+            # Узел, который поля не присылает, тоже нужен: стоимость
+            # тогда неизвестна, а не равна нулю.
+            if self.effective_gas_price is not None:
+                receipt["effectiveGasPrice"] = hex(self.effective_gas_price)
+            return _ok(receipt)
         raise AssertionError(f"неожиданный вызов узла: {method}")
 
 

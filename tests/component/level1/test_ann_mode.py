@@ -171,3 +171,92 @@ class TestSelection:
         ).monik_fields
         # Лучшая по заработку сумма — большая из проверенных.
         assert Decimal(fields["amount"]) == Decimal(100)
+
+
+class TestModeAmounts:
+    """Суммы торгового прохода задаются отдельно от общих.
+
+    Суммы ``scanner.amounts`` — это вопрос анализа: ими Level 2
+    проверяет найденную возможность, и от денег на кошельке они не
+    зависят. Суммы режима ``ann`` — наоборот, ограничены остатком счёта:
+    сделка на сумму, которой нет, не состоится. Один общий список
+    заставлял бы менять одно ради другого.
+    """
+
+    def test_mode_amounts_replace_the_common_list(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        document = _stable_document()
+        document["scanner"]["amounts"] = ["50", "100", "300", "500"]
+        document["scanner"]["modes"] = {
+            "ann": {"enabled": True, "interval_seconds": 30, "amounts": ["50", "100"]}
+        }
+        harness = _harness(document, database, clock)
+
+        ann = harness.scanner.scopes(ScanMode.ANN)[0]
+
+        assert ann.raw_amounts == (50_000_000, 100_000_000)
+
+    def test_common_list_is_used_when_the_mode_has_none(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        document = _stable_document()
+        document["scanner"]["amounts"] = ["50", "100", "300"]
+        document["scanner"]["modes"] = {"ann": {"enabled": True, "interval_seconds": 30}}
+        harness = _harness(document, database, clock)
+
+        ann = harness.scanner.scopes(ScanMode.ANN)[0]
+
+        assert ann.raw_amounts == (50_000_000, 100_000_000, 300_000_000)
+
+    def test_empty_mode_amounts_are_rejected(self) -> None:
+        """Пустой список — не «как обычно», а молча выключенный режим."""
+        document = _stable_document()
+        document["scanner"]["modes"] = {
+            "ann": {"enabled": True, "interval_seconds": 30, "amounts": []}
+        }
+
+        with pytest.raises(Exception, match="mode amounts must not be empty"):
+            parse_configuration(document, environ=dict(VALID_ENV))
+
+
+class TestModeTimeout:
+    """Срок прохода тоже принадлежит режиму.
+
+    Проход обязан укладываться в свой интервал, иначе его запуски
+    накладываются по построению. Интервалы у режимов разные, и общий
+    срок пришлось бы равнять по самому быстрому — что обрезало бы
+    медленный обход всего набора токенов.
+    """
+
+    def test_fast_mode_may_keep_its_own_deadline(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        document = _stable_document()
+        document["scanner"]["level1"] = {"amount": "50", "scan_timeout_seconds": 240}
+        document["scanner"]["modes"] = {
+            "ur": {"enabled": True, "interval_seconds": 300},
+            "ann": {"enabled": True, "interval_seconds": 10, "scan_timeout_seconds": 10},
+        }
+        configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
+
+        assert configuration.scanner.scan_timeout_for(ScanMode.ANN) == 10
+        assert configuration.scanner.scan_timeout_for(ScanMode.UR) == 240
+
+    def test_deadline_longer_than_the_mode_interval_is_rejected(self) -> None:
+        document = _stable_document()
+        document["scanner"]["modes"] = {
+            "ann": {"enabled": True, "interval_seconds": 10, "scan_timeout_seconds": 30}
+        }
+
+        with pytest.raises(Exception, match="must not exceed the mode interval"):
+            parse_configuration(document, environ=dict(VALID_ENV))
+
+    def test_fast_mode_without_its_own_deadline_still_constrains_the_common_one(self) -> None:
+        """Режим без своего срока по-прежнему ограничивает общий."""
+        document = _stable_document()
+        document["scanner"]["level1"] = {"amount": "50", "scan_timeout_seconds": 240}
+        document["scanner"]["modes"] = {"ann": {"enabled": True, "interval_seconds": 10}}
+
+        with pytest.raises(Exception, match="shortest enabled mode interval"):
+            parse_configuration(document, environ=dict(VALID_ENV))

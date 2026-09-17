@@ -48,8 +48,16 @@ class TradingConfig(ConfigSection):
 
     #: Минимальная чистая прибыль, при которой позицию можно закрывать.
     #: Задаётся в базовом токене, а не в процентах: решение о выходе
-    #: принимается деньгами.
+    #: принимается деньгами. Чистая — за вычетом газа обеих ног.
+    #:
+    #: Порог действует на проверке **сразу после покупки**: шанс выйти в
+    #: плюс наивысший именно тогда, и соглашаться на меньшее незачем.
     min_exit_profit: PositiveDecimal = Decimal("0.01")
+
+    #: Порог для сделки, ушедшей в ожидание. Он ниже основного: деньги
+    #: уже заперты в позиции, и выйти из них выгоднее, чем ждать прежней
+    #: прибыли неопределённо долго.
+    min_exit_profit_waiting: PositiveDecimal = Decimal("0.005")
 
     #: Как часто перепроверять цену продажи у открытой позиции.
     recheck_interval_seconds: int = Field(default=10, ge=1, le=3_600)
@@ -89,4 +97,11 @@ class TradingConfig(ConfigSection):
             )
         if self.min_exit_profit <= Decimal(0):
             raise ValueError("min_exit_profit must be positive")
+        if self.min_exit_profit_waiting <= Decimal(0):
+            raise ValueError("min_exit_profit_waiting must be positive")
+        if self.min_exit_profit_waiting > self.min_exit_profit:
+            raise ValueError(
+                "min_exit_profit_waiting must not exceed min_exit_profit: the threshold of a "
+                "position already waiting is a concession, not a tightening"
+            )
         return self

@@ -31,9 +31,37 @@ __all__ = ["SqlitePositionRepository"]
 _COLUMNS = (
     "position_id, t_id, network_id, status, base_token, base_decimals, base_symbol, "
     "target_token, target_decimals, target_symbol, buy_provider_id, sell_provider_id, "
-    "raw_input, raw_acquired, raw_returned, buy_tx_hash, sell_tx_hash, "
+    "raw_input, raw_acquired, raw_returned, "
+    "raw_target_before_buy, raw_base_before_sell, buy_gas_wei, sell_gas_wei, raw_gas_cost, "
+    "buy_tx_hash, sell_tx_hash, "
     "opened_at, updated_at, closed_at, long_wait_notified_at"
 )
+
+#: Поля, которые меняются по ходу сделки. Перечислены один раз: список
+#: столбцов и список значений обязаны совпадать, и держать их порядок
+#: синхронным вручную в двух местах — верный способ однажды записать
+#: расход газа в поле выручки.
+_MUTABLE = (
+    "status",
+    "raw_acquired",
+    "raw_returned",
+    "raw_target_before_buy",
+    "raw_base_before_sell",
+    "buy_gas_wei",
+    "sell_gas_wei",
+    "raw_gas_cost",
+    "buy_tx_hash",
+    "sell_tx_hash",
+    "updated_at",
+    "closed_at",
+    "long_wait_notified_at",
+)
+
+#: Готовые куски SQL. Собираются из констант модуля один раз: запрос не
+#: должен складываться из значений во время работы — охранный тест
+#: следит за этим, и он прав.
+_PLACEHOLDERS = ", ".join("?" * len(_COLUMNS.split(", ")))
+_ASSIGNMENTS = ", ".join(f"{name} = ?" for name in _MUTABLE)
 
 
 class SqlitePositionRepository:
@@ -50,8 +78,7 @@ class SqlitePositionRepository:
         останется.
         """
         await self._database.execute(
-            f"INSERT INTO positions ({_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO positions ({_COLUMNS}) VALUES ({_PLACEHOLDERS})",
             (
                 str(position.t_id),
                 str(position.t_id),
@@ -68,6 +95,11 @@ class SqlitePositionRepository:
                 to_raw_amount(position.raw_input),
                 None if position.raw_acquired is None else to_raw_amount(position.raw_acquired),
                 None if position.raw_returned is None else to_raw_amount(position.raw_returned),
+                _raw(position.raw_target_before_buy),
+                _raw(position.raw_base_before_sell),
+                _raw(position.buy_gas_wei),
+                _raw(position.sell_gas_wei),
+                _raw(position.raw_gas_cost),
                 position.buy_tx_hash,
                 position.sell_tx_hash,
                 to_timestamp(position.opened_at),
@@ -82,13 +114,16 @@ class SqlitePositionRepository:
     async def update(self, position: Position) -> None:
         """Сохранить новое состояние сделки."""
         await self._database.execute(
-            "UPDATE positions SET status = ?, raw_acquired = ?, raw_returned = ?, "
-            "buy_tx_hash = ?, sell_tx_hash = ?, updated_at = ?, closed_at = ?, "
-            "long_wait_notified_at = ? WHERE t_id = ?",
+            f"UPDATE positions SET {_ASSIGNMENTS} WHERE t_id = ?",
             (
                 position.status.value,
-                None if position.raw_acquired is None else to_raw_amount(position.raw_acquired),
-                None if position.raw_returned is None else to_raw_amount(position.raw_returned),
+                _raw(position.raw_acquired),
+                _raw(position.raw_returned),
+                _raw(position.raw_target_before_buy),
+                _raw(position.raw_base_before_sell),
+                _raw(position.buy_gas_wei),
+                _raw(position.sell_gas_wei),
+                _raw(position.raw_gas_cost),
                 position.buy_tx_hash,
                 position.sell_tx_hash,
                 to_timestamp(position.updated_at) if position.updated_at else None,
@@ -159,6 +194,12 @@ def _token(row: aiosqlite.Row, prefix: str, network_id: NetworkId) -> Token:
     )
 
 
+def _raw(value: int | None) -> str | None:
+    """Целое в хранимый вид. ``None`` остаётся ``None``: пустое поле
+    означает «неизвестно», а не «ноль»."""
+    return None if value is None else to_raw_amount(value)
+
+
 def _optional_raw(row: aiosqlite.Row, name: str) -> int | None:
     value = optional_column(row, name)
     return None if value is None else from_raw_amount(value)
@@ -182,6 +223,11 @@ def _to_domain(row: aiosqlite.Row) -> Position:
         raw_input=from_raw_amount(column(row, "raw_input")),
         raw_acquired=_optional_raw(row, "raw_acquired"),
         raw_returned=_optional_raw(row, "raw_returned"),
+        raw_target_before_buy=_optional_raw(row, "raw_target_before_buy"),
+        raw_base_before_sell=_optional_raw(row, "raw_base_before_sell"),
+        buy_gas_wei=_optional_raw(row, "buy_gas_wei"),
+        sell_gas_wei=_optional_raw(row, "sell_gas_wei"),
+        raw_gas_cost=_optional_raw(row, "raw_gas_cost"),
         buy_tx_hash=_optional_str(row, "buy_tx_hash"),
         sell_tx_hash=_optional_str(row, "sell_tx_hash"),
         opened_at=from_timestamp(str(column(row, "opened_at"))),

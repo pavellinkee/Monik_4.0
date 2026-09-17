@@ -396,7 +396,7 @@ def build_application(
                 interval_seconds=config.scanner.modes.for_mode(mode).interval_seconds,
             ),
             priority=RequestPriority.LEVEL1_BUY,
-            timeout=timedelta(seconds=config.scanner.level1.scan_timeout_seconds),
+            timeout=timedelta(seconds=config.scanner.scan_timeout_for(mode)),
         )
     if container.watcher is not None:
         # Ведение открытых сделок не зависит от того, разрешено ли

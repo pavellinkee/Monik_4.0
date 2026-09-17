@@ -49,6 +49,21 @@ class TransactionReceipt:
     succeeded: bool
     gas_used: int
     block_number: int
+    #: Цена, по которой газ действительно оплачен. Узел сообщает её в той
+    #: же квитанции, поэтому фактическая стоимость транзакции известна без
+    #: единого дополнительного запроса. ``None`` — узел поля не прислал.
+    effective_gas_price: int | None = None
+
+    @property
+    def gas_cost_wei(self) -> int | None:
+        """Сколько транзакция стоила на самом деле, в wei.
+
+        ``None``, если цена неизвестна: считать её нулём нельзя, иначе
+        сделка выглядела бы бесплатной (``CLAUDE.md`` §12).
+        """
+        if self.effective_gas_price is None:
+            return None
+        return self.gas_used * self.effective_gas_price
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +276,11 @@ class ChainAccount:
             succeeded=_parse_uint(raw.get("status"), field="status") == 1,
             gas_used=_parse_uint(raw.get("gasUsed"), field="gasUsed"),
             block_number=_parse_uint(raw.get("blockNumber"), field="blockNumber"),
+            effective_gas_price=(
+                None
+                if raw.get("effectiveGasPrice") is None
+                else _parse_uint(raw.get("effectiveGasPrice"), field="effectiveGasPrice")
+            ),
         )
 
     # --- внутреннее -------------------------------------------------------

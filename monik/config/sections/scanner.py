@@ -66,6 +66,44 @@ class ScanModeConfig(ConfigSection):
     #: набор, но не включает выключенное.
     networks: dict[NetworkId, bool] | None = None
 
+    #: Суммы режима. ``None`` — общие ``scanner.amounts``.
+    #:
+    #: Сужение нужно торговому проходу: его суммы ограничены остатком
+    #: счёта, тогда как суммы проверки Level 2 — это вопрос анализа и от
+    #: денег на кошельке не зависят. Один общий список заставлял бы
+    #: менять одно ради другого.
+    amounts: tuple[PositiveDecimal, ...] | None = None
+
+    #: Предельная длительность прохода. ``None`` — общий
+    #: ``level1.scan_timeout_seconds``.
+    #:
+    #: Сужение нужно частому режиму: проход обязан укладываться в свой
+    #: интервал, а у режимов интервалы разные, и общий срок пришлось бы
+    #: равнять по самому быстрому — что обрезало бы медленный обход
+    #: всего набора токенов.
+    scan_timeout_seconds: int | None = Field(default=None, ge=1, le=86_400)
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> Self:
+        if self.amounts is not None:
+            if not self.amounts:
+                raise ValueError(
+                    "mode amounts must not be empty: omit the key to use the common list"
+                )
+            if len(set(self.amounts)) != len(self.amounts):
+                raise ValueError("mode amounts must be unique")
+            if any(amount <= Decimal(0) for amount in self.amounts):
+                raise ValueError("mode amounts must be positive")
+        if (
+            self.scan_timeout_seconds is not None
+            and self.scan_timeout_seconds > self.interval_seconds
+        ):
+            raise ValueError(
+                f"scan_timeout_seconds ({self.scan_timeout_seconds}) must not exceed the mode "
+                f"interval ({self.interval_seconds}), otherwise its scans would overlap"
+            )
+        return self
+
 
 class ScanModesConfig(ConfigSection):
     """Все режимы сканирования.
@@ -196,17 +234,32 @@ class ScannerConfig(ConfigSection):
             raise ValueError(
                 "at least one scan mode must be enabled: Level 1 would never run otherwise"
             )
-        # Таймаут цикла проверяется по самому частому включённому режиму:
-        # иначе его проходы накладывались бы по построению.
-        fastest = min(
-            self.modes.for_mode(mode).interval_seconds for mode in self.modes.enabled_modes()
-        )
-        if self.level1.scan_timeout_seconds > fastest:
+        # Таймаут цикла проверяется по самому частому включённому режиму
+        # из тех, что пользуются общим сроком: иначе его проходы
+        # накладывались бы по построению. Режим со своим сроком проверен
+        # собственным валидатором и общий не ограничивает — иначе один
+        # быстрый режим диктовал бы срок всем остальным.
+        shared = [
+            self.modes.for_mode(mode).interval_seconds
+            for mode in self.modes.enabled_modes()
+            if self.modes.for_mode(mode).scan_timeout_seconds is None
+        ]
+        if shared and self.level1.scan_timeout_seconds > min(shared):
             raise ValueError(
                 f"scan_timeout_seconds ({self.level1.scan_timeout_seconds}) must not exceed the "
-                f"shortest enabled mode interval ({fastest}), otherwise scans would overlap"
+                f"shortest enabled mode interval ({min(shared)}), otherwise scans would overlap"
             )
         return self
+
+    def amounts_for(self, mode: ScanMode) -> tuple[PositiveDecimal, ...]:
+        """Суммы режима: собственные, если заданы, иначе общие."""
+        own = self.modes.for_mode(mode).amounts
+        return own if own is not None else self.amounts
+
+    def scan_timeout_for(self, mode: ScanMode) -> int:
+        """Предельная длительность прохода режима."""
+        own = self.modes.for_mode(mode).scan_timeout_seconds
+        return own if own is not None else self.level1.scan_timeout_seconds
 
     @property
     def level1_amount(self) -> PositiveDecimal:

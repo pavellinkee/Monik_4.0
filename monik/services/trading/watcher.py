@@ -8,6 +8,18 @@
 Правило выхода задано оператором: продавать, когда круг даёт **чистую
 прибыль в базовом токене** не меньше заданной. Не процент — деньги.
 
+Чистая — значит за вычетом газа. Газ платится в обе стороны и от суммы
+сделки не зависит, поэтому на малых суммах он и решает исход: круг,
+выигравший на цене меньше, чем стоила пара транзакций, приносит убыток.
+Сравнивать с порогом одну лишь разницу токенов означало бы закрывать
+сделки в минус, считая их прибыльными.
+
+Порогов два. Сразу после покупки действует основной: шанс выйти в плюс
+наивысший именно тогда, и соглашаться на меньшее незачем. Если момент
+упущен и сделка ушла в ожидание, действует пониженный порог — деньги
+заперты, и выйти из них выгоднее, чем ждать прежней прибыли
+(решение оператора).
+
 Система никогда не закрывает позицию в убыток сама. Если ожидание
 затянулось, она **сообщает оператору** и продолжает ждать: решение
 принимает человек (``the_main_rules.md``, правило 11).
@@ -20,6 +32,7 @@ from decimal import Decimal
 
 from monik.domain.enums.operations import OperationType
 from monik.domain.enums.trading import PositionStatus
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.position import Position
 from monik.domain.value_objects.identifiers import RequestId
 from monik.infrastructure.providers.contract import AggregatorAdapter, QuoteRequest
@@ -27,7 +40,7 @@ from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.trading.chain import ChainAccount
 from monik.services.trading.executor import TradeExecutor
-from monik.services.trading.ports import PositionStore
+from monik.services.trading.ports import ExecutionCosts, PositionStore
 from monik.services.trading.sender import SentTransaction, TransactionSender
 
 __all__ = ["LongWaitNotice", "PositionWatcher"]
@@ -65,8 +78,10 @@ class PositionWatcher:
         account: ChainAccount,
         sender: TransactionSender,
         executor: TradeExecutor,
+        costs: ExecutionCosts,
         clock: Clock,
         min_exit_profit_raw: int,
+        min_exit_profit_waiting_raw: int,
         slippage_bps: int,
         long_wait_enabled: bool,
         long_wait_seconds: int,
@@ -78,8 +93,10 @@ class PositionWatcher:
         self._account = account
         self._sender = sender
         self._executor = executor
+        self._costs = costs
         self._clock = clock
         self._min_exit_profit_raw = min_exit_profit_raw
+        self._min_exit_profit_waiting_raw = min_exit_profit_waiting_raw
         self._slippage_bps = slippage_bps
         self._long_wait_enabled = long_wait_enabled
         self._long_wait = timedelta(seconds=long_wait_seconds)
@@ -117,7 +134,7 @@ class PositionWatcher:
         ради которой он затеян.
         """
         try:
-            await self._consider_exit(position)
+            await self._consider_exit(position, immediate=True)
         except Exception as error:  # noqa: BLE001 - сделка уже открыта, её ведёт наблюдатель
             _LOGGER.error(
                 "immediate exit check failed",
@@ -133,7 +150,7 @@ class PositionWatcher:
         if position.status is PositionStatus.SELLING:
             await self._settle_pending_sell(position)
             return None
-        return await self._consider_exit(position)
+        return await self._consider_exit(position, immediate=False)
 
     async def _settle_pending_buy(self, position: Position) -> None:
         """Подобрать покупку, квитанция которой ещё не пришла."""
@@ -142,7 +159,7 @@ class PositionWatcher:
         receipt = await self._account.receipt(position.network_id, position.buy_tx_hash)
         if receipt is None:
             return
-        await self._executor.settle_buy(position, succeeded=receipt.succeeded, before_raw=0)
+        await self._executor.settle_buy(position, succeeded=receipt.succeeded, receipt=receipt)
 
     async def _settle_pending_sell(self, position: Position) -> None:
         """Подобрать продажу, квитанция которой ещё не пришла."""
@@ -152,6 +169,10 @@ class PositionWatcher:
         if receipt is None:
             return
         now = self._clock.now()
+        # Откатившаяся попытка тоже стоила газа, и этот расход относится
+        # к сделке: считать его нулём значило бы объявить неудачу
+        # бесплатной.
+        spent_on_selling = _total_wei(position.sell_gas_wei, receipt.gas_cost_wei)
         if not receipt.succeeded:
             # Продажа откатилась — токен остался у нас. Возвращаемся к
             # ожиданию: это не потеря, а неудачная попытка выхода.
@@ -160,34 +181,88 @@ class PositionWatcher:
                     update={
                         "status": PositionStatus.HOLDING,
                         "sell_tx_hash": None,
+                        "sell_gas_wei": spent_on_selling,
                         "updated_at": now,
                     }
                 )
             )
             return
-        returned = await self._account.token_balance(position.base_token)
-        await self._positions.update(
-            position.model_copy(
-                update={
-                    "status": PositionStatus.CLOSED,
-                    "raw_returned": returned.raw,
-                    "updated_at": now,
-                    "closed_at": now,
-                }
+        if position.raw_base_before_sell is None:
+            # Так может выглядеть только сделка, записанная версией без
+            # этого поля: с тех пор его ставит сама отправка продажи.
+            # Выручку в этом случае считать не из чего, и придумывать её
+            # нельзя — итог объявляется неизвестным, а сделка всё равно
+            # закрывается: токены проданы, держать запись открытой не за
+            # что.
+            _LOGGER.error(
+                "trade closed with an unknown result: the balance before the sale was not recorded",
+                extra=log_fields(t_id=str(position.t_id), tx=position.sell_tx_hash or ""),
             )
+            await self._positions.update(
+                position.model_copy(
+                    update={
+                        "status": PositionStatus.CLOSED,
+                        "raw_returned": position.raw_input,
+                        "raw_gas_cost": None,
+                        "sell_gas_wei": spent_on_selling,
+                        "updated_at": now,
+                        "closed_at": now,
+                    }
+                )
+            )
+            return
+        after = await self._account.token_balance(position.base_token)
+        # Выручка — это прирост остатка, а не сам остаток: на счёте лежат
+        # и деньги, к этой сделке отношения не имеющие.
+        returned = after.raw - position.raw_base_before_sell
+        gas_cost = await self._round_trip_cost_raw(
+            position, buy_wei=position.buy_gas_wei, sell_wei=spent_on_selling
         )
+        closed = position.model_copy(
+            update={
+                "status": PositionStatus.CLOSED,
+                "raw_returned": max(returned, 0),
+                "sell_gas_wei": spent_on_selling,
+                "raw_gas_cost": gas_cost,
+                "updated_at": now,
+                "closed_at": now,
+            }
+        )
+        await self._positions.update(closed)
         _LOGGER.info(
             "trade closed",
-            extra=log_fields(t_id=str(position.t_id), tx=position.sell_tx_hash or ""),
+            extra=log_fields(
+                t_id=str(position.t_id),
+                tx=position.sell_tx_hash or "",
+                returned=str(
+                    Decimal(closed.raw_returned or 0).scaleb(-position.base_token.decimals)
+                ),
+                gross=_money(closed.gross_result),
+                gas=_money(
+                    None
+                    if gas_cost is None
+                    else Decimal(gas_cost).scaleb(-position.base_token.decimals)
+                ),
+                net=_money(closed.net_result),
+            ),
         )
 
-    async def _consider_exit(self, position: Position) -> LongWaitNotice | None:
-        """Проверить, выгодно ли продавать сейчас."""
+    async def _consider_exit(self, position: Position, *, immediate: bool) -> LongWaitNotice | None:
+        """Проверить, выгодно ли продавать сейчас.
+
+        Порядок шагов выбран так, чтобы не тратить запросов впустую.
+        Сначала берётся котировка — без неё решать нечего. Разница
+        токенов сравнивается с порогом **до** сборки транзакции: круг,
+        не окупающий себя даже без газа, с газом тем более убыточен, и
+        собирать вызов роутера ради этого незачем. Точная стоимость
+        считается только у круга, у которого есть шанс.
+        """
         if position.raw_acquired is None:
             return None
         adapter = self._adapters.get(position.sell_provider_id.value)
         if adapter is None:
             return None
+        needed = self._min_exit_profit_raw if immediate else self._min_exit_profit_waiting_raw
         request = QuoteRequest(
             network_id=position.network_id,
             operation=OperationType.SELL,
@@ -198,27 +273,78 @@ class PositionWatcher:
             slippage_bps=self._slippage_bps,
         )
         quote = await adapter.get_quote(request)
-        profit = position.profit_if_sold_for(quote.output_amount.raw)
-        if profit < self._min_exit_profit_raw:
-            _LOGGER.info(
-                "trade waiting",
-                extra=log_fields(
-                    t_id=str(position.t_id),
-                    profit=str(Decimal(profit).scaleb(-position.base_token.decimals)),
-                    needed=str(
-                        Decimal(self._min_exit_profit_raw).scaleb(-position.base_token.decimals)
-                    ),
-                ),
-            )
-            return self._long_wait_notice(position)
-        await self._sell(position, adapter, request)
+        gross = position.profit_if_sold_for(quote.output_amount.raw)
+        if gross < needed:
+            return self._wait(position, profit=gross, needed=needed, costs=None)
+
+        transaction = await adapter.build_swap(request)
+        costs = await self._exit_costs_raw(position, transaction)
+        if costs is None:
+            # Стоимость круга неизвестна. Продавать вслепую нельзя:
+            # неизвестный расход нулём не считается (``CLAUDE.md`` §12).
+            return self._wait(position, profit=gross, needed=needed, costs=None)
+        profit = position.profit_if_sold_for(quote.output_amount.raw, raw_costs=costs)
+        if profit < needed:
+            return self._wait(position, profit=profit, needed=needed, costs=costs)
+        await self._sell(position, transaction)
         return None
 
-    async def _sell(
-        self, position: Position, adapter: AggregatorAdapter, request: QuoteRequest
-    ) -> None:
-        """Собрать, проверить и отправить продажу."""
-        transaction = await adapter.build_swap(request)
+    async def _exit_costs_raw(self, position: Position, transaction: SwapTransaction) -> int | None:
+        """Во что обойдётся круг целиком, в базовом токене.
+
+        Считается всё, что сделка стоит и будет стоить: покупка, уже
+        потраченное на неудачные попытки выхода и предстоящая продажа.
+        Предел газа берётся у агрегатора — он же поедет в транзакцию,
+        поэтому отдельная оценка узлом не нужна.
+        """
+        price = await self._account.gas_price(position.network_id)
+        total_wei = _total_wei(
+            position.buy_gas_wei, position.sell_gas_wei, transaction.gas_limit * price
+        )
+        if total_wei is None:
+            _LOGGER.warning(
+                "exit postponed: the gas already spent is unknown",
+                extra=log_fields(t_id=str(position.t_id)),
+            )
+            return None
+        return await self._costs.to_base_raw(
+            position.network_id, position.base_token, wei=total_wei
+        )
+
+    async def _round_trip_cost_raw(
+        self, position: Position, *, buy_wei: int | None, sell_wei: int | None
+    ) -> int | None:
+        """Фактическая стоимость круга в базовом токене."""
+        total_wei = _total_wei(buy_wei, sell_wei)
+        if total_wei is None:
+            return None
+        return await self._costs.to_base_raw(
+            position.network_id, position.base_token, wei=total_wei
+        )
+
+    def _wait(
+        self, position: Position, *, profit: int, needed: int, costs: int | None
+    ) -> LongWaitNotice | None:
+        """Отложить выход и при необходимости сообщить оператору."""
+        decimals = position.base_token.decimals
+        _LOGGER.info(
+            "trade waiting",
+            extra=log_fields(
+                t_id=str(position.t_id),
+                profit=str(Decimal(profit).scaleb(-decimals)),
+                needed=str(Decimal(needed).scaleb(-decimals)),
+                gas=_money(None if costs is None else Decimal(costs).scaleb(-decimals)),
+            ),
+        )
+        return self._long_wait_notice(position)
+
+    async def _sell(self, position: Position, transaction: SwapTransaction) -> None:
+        """Проверить и отправить продажу.
+
+        Транзакция приходит уже собранной: её собрали, чтобы узнать
+        стоимость выхода, и собирать второй раз значило бы потратить
+        лишний запрос на то же самое.
+        """
         simulation = await self._account.simulate(transaction)
         if not simulation.succeeded:
             _LOGGER.warning(
@@ -226,6 +352,10 @@ class PositionWatcher:
                 extra=log_fields(t_id=str(position.t_id), reason=simulation.revert_reason or ""),
             )
             return
+        # Остаток до продажи запоминается перед отправкой: выручка —
+        # это прирост, и прирост должен быть досчитан даже если квитанцию
+        # подберёт уже другой процесс.
+        before = await self._account.token_balance(position.base_token)
         sent: SentTransaction = await self._sender.send(
             position.network_id,
             to=transaction.to,
@@ -233,24 +363,20 @@ class PositionWatcher:
             value=transaction.value,
             gas_limit=transaction.gas_limit,
         )
-        await self._positions.update(
-            position.model_copy(
-                update={
-                    "status": PositionStatus.SELLING,
-                    "sell_tx_hash": sent.tx_hash,
-                    "updated_at": self._clock.now(),
-                }
-            )
+        selling = position.model_copy(
+            update={
+                "status": PositionStatus.SELLING,
+                "sell_tx_hash": sent.tx_hash,
+                "raw_base_before_sell": before.raw,
+                "updated_at": self._clock.now(),
+            }
         )
+        await self._positions.update(selling)
         receipt = await self._sender.wait(
             sent, timeout=self._receipt_timeout, poll=self._receipt_poll
         )
         if receipt is not None:
-            await self._settle_pending_sell(
-                position.model_copy(
-                    update={"status": PositionStatus.SELLING, "sell_tx_hash": sent.tx_hash}
-                )
-            )
+            await self._settle_pending_sell(selling)
 
     def _long_wait_notice(self, position: Position) -> LongWaitNotice | None:
         """Сообщить о затянувшемся ожидании — один раз, а не каждый такт."""
@@ -266,3 +392,23 @@ class PositionWatcher:
         await self._positions.update(
             position.model_copy(update={"long_wait_notified_at": self._clock.now()})
         )
+
+
+def _total_wei(*parts: int | None) -> int | None:
+    """Сумма расходов в wei.
+
+    Неизвестное слагаемое делает неизвестной всю сумму: подставить вместо
+    него ноль означало бы объявить часть расхода бесплатной
+    (``CLAUDE.md`` §12).
+    """
+    total = 0
+    for part in parts:
+        if part is None:
+            return None
+        total += part
+    return total
+
+
+def _money(value: Decimal | None) -> str:
+    """Денежная величина для журнала. Неизвестное так и называется."""
+    return "неизвестно" if value is None else str(value)
