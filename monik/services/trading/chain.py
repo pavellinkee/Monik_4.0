@@ -20,6 +20,7 @@ from typing import Any
 from monik.domain.enums.capability import CapabilityOperation
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.errors import DataError
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.resource import ResourceKey, ResourceRequest
 from monik.domain.models.token import Token
 from monik.domain.value_objects.identifiers import RequestId
@@ -29,7 +30,7 @@ from monik.services.gas.providers import RPC_RESOURCE_OWNER
 from monik.services.observability.clock import Clock
 from monik.services.resources import ResourceManager
 
-__all__ = ["ChainAccount", "TokenBalance"]
+__all__ = ["ChainAccount", "SimulationResult", "TokenBalance"]
 
 #: Селектор ``balanceOf(address)``.
 _BALANCE_OF = "0x70a08231"
@@ -38,6 +39,28 @@ _ALLOWANCE = "0xdd62ed3e"
 
 #: Значение «разрешено неограниченно» у ERC-20: 2**256 - 1.
 UNLIMITED_ALLOWANCE = (1 << 256) - 1
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationResult:
+    """Итог проверки сделки без отправки."""
+
+    succeeded: bool
+    #: Что ответил узел, если сделка не прошла бы.
+    revert_reason: str | None = None
+
+    def describe(self) -> str:
+        """Строка для журнала."""
+        if self.succeeded:
+            return "прошла бы"
+        return f"откатилась бы: {self.revert_reason or 'причина не названа'}"
+
+
+@dataclass(frozen=True, slots=True)
+class _Reverted:
+    """Внутренняя пометка: узел ответил отказом, и это ожидаемо."""
+
+    reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +146,44 @@ class ChainAccount:
         )
         return _parse_uint(raw, field="eth_getBalance")
 
+    async def simulate(self, transaction: SwapTransaction) -> SimulationResult:
+        """Проверить сделку, **не отправляя** её.
+
+        Узел выполняет вызов на текущем состоянии сети и возвращает либо
+        результат, либо отказ. Это ближайшее к правде, что можно узнать до
+        отправки: проверяются и разрешение, и остаток, и сам маршрут, и
+        минимальная сумма, зашитая в транзакцию.
+
+        Отказ — не сбой, а ответ: так выглядит сделка, которая не прошла
+        бы. Именно этим завышенная котировка и оборачивается — потерей
+        газа вместо исполнения по плохому курсу.
+        """
+        url = self._rpc_urls.get(str(transaction.network_id))
+        if url is None:
+            raise DataError(
+                f"network {transaction.network_id} has no rpc endpoint configured",
+                code="rpc_endpoint_missing",
+            )
+        params = [
+            {
+                "from": self._address,
+                "to": transaction.to,
+                "data": transaction.data,
+                "value": hex(transaction.value),
+            },
+            "latest",
+        ]
+        outcome = await self._request(
+            transaction.network_id,
+            method="eth_call",
+            params=params,
+            dedup=f"simulate:{transaction.to}:{transaction.data[:18]}",
+            allow_revert=True,
+        )
+        if isinstance(outcome, _Reverted):
+            return SimulationResult(succeeded=False, revert_reason=outcome.reason)
+        return SimulationResult(succeeded=True)
+
     # --- внутреннее -------------------------------------------------------
 
     async def _call(
@@ -150,6 +211,7 @@ class ChainAccount:
         params: list[Any],
         dedup: str,
         operation: CapabilityOperation = CapabilityOperation.TOKEN_METADATA,
+        allow_revert: bool = False,
     ) -> Any:
         url = self._rpc_urls.get(str(network_id))
         if url is None:
@@ -190,6 +252,9 @@ class ChainAccount:
                 raise DataError("rpc response is not a JSON object", code="rpc_response_malformed")
             error = body.get("error")
             if error is not None:
+                if allow_revert:
+                    # Для симуляции отказ — это ответ: сделка не прошла бы.
+                    return _Reverted(reason=_revert_reason(error))
                 # Остаток и разрешение — это не «свойство адреса», как у
                 # metadata: отказ здесь означает, что мы не знаем сумму.
                 # Неизвестное не равно нулю (``CLAUDE.md`` §12).
@@ -213,3 +278,19 @@ def _parse_uint(raw: Any, *, field: str) -> int:
             f"rpc returned a malformed value for {field!r}",
             code="rpc_value_invalid",
         ) from error
+
+
+def _revert_reason(error: Any) -> str | None:
+    """Достать понятную причину отказа из ответа узла.
+
+    Узлы отвечают по-разному: один кладёт текст в ``message``, другой —
+    в ``data``. Берётся то, что есть; выдумывать причину нельзя.
+    """
+    if not isinstance(error, dict):
+        return None
+    message = error.get("message")
+    data = error.get("data")
+    if isinstance(data, dict):
+        data = data.get("message")
+    parts = [str(item) for item in (message, data) if item]
+    return " | ".join(parts) or None

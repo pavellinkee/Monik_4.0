@@ -25,11 +25,14 @@ from monik.domain.errors import (
     NoRouteError,
     ProviderError,
     RouteRejectedError,
+    UnsupportedError,
 )
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.resource import ResourceKey, ResourceRequest
 from monik.domain.value_objects.identifiers import CorrelationId, RequestId
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import HttpClient, HttpRequest, HttpResponse, classify_response
+from monik.infrastructure.providers.contract import QuoteRequest
 from monik.services.observability.clock import Clock
 from monik.services.observability.redaction import REDACTED, redact_text
 from monik.services.resources import ResourceManager
@@ -73,6 +76,20 @@ class HttpProviderAdapter:
     def base_url(self) -> str:
         """Базовый URL API."""
         return self._base_url
+
+    async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
+        """Сборка транзакции по умолчанию не поддерживается.
+
+        Адаптер, умеющий исполнять, переопределяет метод и объявляет
+        ``supports_execution``. Отказ здесь честнее «почти готового»
+        вызова: провайдер, который не отдаёт транзакцию, годится для
+        поиска, но не для торговли (``06_AGGREGATOR_ADAPTERS.md`` §15).
+        """
+        raise UnsupportedError(
+            f"{self._provider_id.value} adapter cannot build swap transactions",
+            code="provider_execution_unsupported",
+            provider_code=self._provider_id.value,
+        )
 
     async def aclose(self) -> None:
         """Освободить ресурсы HTTP-клиента."""

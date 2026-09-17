@@ -163,7 +163,10 @@ providers:
       polygon: "https://app.uniswap.org/swap?chain=polygon"
       arbitrum: "https://app.uniswap.org/swap?chain=arbitrum"
     options:
-      swapper: "0x4745ab81B8FD8C9ea6Af85980eEC6F23865576aB"
+      # Адрес, от имени которого строится котировка и собирается
+      # транзакция. Это торговый счёт режима ann: транзакцию исполнит
+      # именно он, и котировка должна быть посчитана для него же.
+      swapper: "0xc6fb9692Fff871e1b4874E8Dc0620fd77CE02390"
 
 # Token universe. Authoritative metadata живёт в Token Registry, здесь
 # задаётся разрешённый набор. decimals указывается явно и не выводится

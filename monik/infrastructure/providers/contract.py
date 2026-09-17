@@ -24,6 +24,7 @@ from monik.domain.enums.operations import (
 )
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
 from monik.domain.models.route import Route
@@ -127,6 +128,9 @@ class AdapterCapabilities:
     supports_fixed_route: bool = False
     supports_fee_discovery: bool = False
     supports_gas_estimate: bool = False
+    #: Умеет ли адаптер собрать готовую транзакцию обмена. Без этого
+    #: провайдер годится для поиска, но не для исполнения.
+    supports_execution: bool = False
 
     def supports_network(self, network_id: NetworkId) -> bool:
         """Поддерживается ли сеть."""
@@ -186,6 +190,20 @@ class AggregatorAdapter(Protocol):
 
     async def validate_fixed_route(self, request: QuoteRequest) -> RouteValidation:
         """Проверить, воспроизводится ли зафиксированный маршрут."""
+        ...
+
+    async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
+        """Собрать готовую к отправке транзакцию обмена.
+
+        Котировка запрашивается заново: транзакция отправляется по свежей
+        цене, а не по той, на которой возможность была найдена. Кешировать
+        котировку между решением и исполнением нельзя — агрегаторы прямо
+        называют это недобросовестным поведением, а цена за минуту уже
+        другая.
+
+        Адаптер, не умеющий собирать транзакции, обязан сообщить об этом
+        :class:`UnsupportedError`, а не вернуть «почти готовый» вызов.
+        """
         ...
 
     async def discover_capabilities(self) -> AdapterCapabilities:

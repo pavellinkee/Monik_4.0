@@ -27,6 +27,7 @@ from typing import Any, Protocol, runtime_checkable
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import MonikError
 from monik.domain.errors.classification import is_availability_failure
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
 from monik.domain.value_objects.identity import NetworkId
@@ -81,6 +82,10 @@ class HealthTrackingAdapter:
     async def get_quote(self, request: QuoteRequest) -> Quote:
         """Получить котировку, зафиксировав исход обращения."""
         return await self._observe(lambda: self._adapter.get_quote(request))
+
+    async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
+        """Собрать транзакцию, зафиксировав исход обращения."""
+        return await self._observe(lambda: self._adapter.build_swap(request))
 
     async def validate_fixed_route(self, request: QuoteRequest) -> RouteValidation:
         """Проверить зафиксированный маршрут, зафиксировав исход обращения.

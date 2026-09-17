@@ -14,6 +14,7 @@ from monik.domain.enums.health import AdapterState
 from monik.domain.enums.operations import RouteValidationOutcome, RoutingMode
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import MonikError
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
 from monik.domain.value_objects.identity import NetworkId
@@ -102,6 +103,28 @@ class FakeAdapter:
             # котировкой, поэтому двойник делает то же: иначе тесты
             # проверяли бы поведение, которого в production не бывает.
             estimated_gas_price_wei=30_000_000_000,
+        )
+
+    async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
+        """Собрать детерминированную транзакцию из котировки.
+
+        **Test implementation** (``CLAUDE.md`` §10): calldata подставная,
+        отправлять её никуда нельзя. Нужна, чтобы проверять путь «решение
+        — сборка — симуляция», не обращаясь к настоящему агрегатору.
+        """
+        quote = await self.get_quote(request)
+        minimum = quote.output_amount.raw - quote.output_amount.raw // 1000
+        return SwapTransaction(
+            provider_id=self._provider_id,
+            network_id=request.network_id,
+            chain_id=1337,
+            to="0x" + "11" * 20,
+            data="0xdeadbeef",
+            value=0,
+            gas_limit=200_000,
+            spender="0x" + "22" * 20,
+            quote=quote,
+            min_output_raw=max(minimum, 1),
         )
 
     async def validate_fixed_route(self, request: QuoteRequest) -> RouteValidation:

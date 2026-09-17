@@ -5,7 +5,7 @@
 деньгами — разные полномочия, и выключаются они по отдельности.
 """
 
-from monik.services.trading.chain import ChainAccount, TokenBalance
+from monik.services.trading.chain import ChainAccount, SimulationResult, TokenBalance
 from monik.services.trading.wallet import TradingWallet
 
-__all__ = ["ChainAccount", "TokenBalance", "TradingWallet"]
+__all__ = ["ChainAccount", "SimulationResult", "TokenBalance", "TradingWallet"]

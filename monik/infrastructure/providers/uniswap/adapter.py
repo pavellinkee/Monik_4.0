@@ -37,6 +37,7 @@ from monik.domain.errors import (
     MonikError,
     UnsupportedError,
 )
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
 from monik.domain.models.route import Route, RouteStep
@@ -148,6 +149,7 @@ class UniswapAdapter(HttpProviderAdapter):
             supports_fixed_route=_SUPPORTS_FIXED_ROUTE,
             supports_fee_discovery=False,
             supports_gas_estimate=True,
+            supports_execution=True,
         )
 
     @property
@@ -178,6 +180,96 @@ class UniswapAdapter(HttpProviderAdapter):
         )
         with normalized_response(_PROVIDER):
             return self._to_quote(request, payload)
+
+    async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
+        """Собрать транзакцию обмена из свежей котировки.
+
+        Trading API устроен в два шага: ``/v1/quote`` возвращает котировку,
+        ``/v1/swap`` превращает её в вызов роутера. Оба шага делаются здесь
+        подряд, потому что второй принимает объект первого целиком — между
+        ними ничего нельзя подменить, и переносить это знание в ядро
+        незачем.
+        """
+        chain_id = self._require_chain_id(request.network_id)
+        quote_payload = await self.request_json(
+            path=endpoints.QUOTE_PATH,
+            network_id=request.network_id,
+            operation=self._capability_operation(request),
+            request_id=request.request_id,
+            method="POST",
+            json_body=self._quote_body(request, chain_id),
+            priority=request.priority,
+            correlation_id=request.correlation_id,
+            timeout=request.timeout,
+            priority_at=request.priority_at,
+        )
+        with normalized_response(_PROVIDER):
+            quote = self._to_quote(request, quote_payload)
+        quote_object = require_field(quote_payload, "quote", provider=_PROVIDER)
+        swap_payload = await self.request_json(
+            path=endpoints.SWAP_PATH,
+            network_id=request.network_id,
+            operation=self._capability_operation(request),
+            request_id=RequestId.generate(),
+            method="POST",
+            # Передаётся ровно то, что вернула котировка: подпись разрешения
+            # не прикладывается, потому что разрешение выдаётся отдельной
+            # транзакцией и живёт на счёте, а не внутри обмена.
+            json_body={"quote": quote_object},
+            priority=request.priority,
+            correlation_id=request.correlation_id,
+            timeout=request.timeout,
+            priority_at=request.priority_at,
+        )
+        with normalized_response(_PROVIDER):
+            return self._to_swap(request, quote, quote_object, swap_payload, chain_id)
+
+    def _to_swap(
+        self,
+        request: QuoteRequest,
+        quote: Quote,
+        quote_object: Any,
+        payload: Any,
+        chain_id: int,
+    ) -> SwapTransaction:
+        """Преобразовать ответ ``/v1/swap`` в транзакцию."""
+        swap = require_field(payload, "swap", provider=_PROVIDER)
+        if not isinstance(swap, dict):
+            raise DataError(
+                "uniswap swap response is not a JSON object",
+                code="provider_response_malformed",
+                provider_code=_PROVIDER.value,
+            )
+        minimum = self._minimum_output(quote_object)
+        return SwapTransaction(
+            provider_id=_PROVIDER,
+            network_id=request.network_id,
+            chain_id=chain_id,
+            to=str(require_field(swap, "to", provider=_PROVIDER)),
+            data=str(require_field(swap, "data", provider=_PROVIDER)),
+            value=_parse_value(swap.get("value")),
+            gas_limit=parse_base_units(
+                require_field(swap, "gasLimit", provider=_PROVIDER),
+                provider=_PROVIDER,
+                field="gasLimit",
+            ),
+            # Роутер списывает входной токен не напрямую, а через Permit2:
+            # разрешение выдаётся ему, а не адресу из поля ``to``.
+            spender=endpoints.PERMIT2_ADDRESS,
+            quote=quote,
+            min_output_raw=minimum,
+        )
+
+    @staticmethod
+    def _minimum_output(quote_object: Any) -> int:
+        """Минимум, ниже которого обмен откатится.
+
+        Значение берётся у самого API, а не считается нами из процента
+        проскальзывания: именно его роутер и проверит.
+        """
+        output = require_field(quote_object, "output", provider=_PROVIDER)
+        raw = require_field(output, "minimumAmount", provider=_PROVIDER)
+        return parse_base_units(raw, provider=_PROVIDER, field="minimumAmount")
 
     async def validate_fixed_route(self, request: QuoteRequest) -> RouteValidation:
         """Сравнить свежий маршрут с зафиксированным Level 1.
@@ -604,3 +696,23 @@ class UniswapAdapter(HttpProviderAdapter):
 def _is_true(value: str | None) -> bool:
     """Разбор булева provider-параметра конфигурации."""
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_value(raw: Any) -> int:
+    """Сумма native token во вложении вызова.
+
+    Отсутствие поля означает ноль: обмен между ERC-20 токенами native
+    token не переносит. Строка ``0x…`` допускается — Trading API
+    возвращает именно её.
+    """
+    if raw is None:
+        return 0
+    text = str(raw)
+    try:
+        return int(text, 16) if text.startswith("0x") else int(text)
+    except ValueError as error:
+        raise DataError(
+            "uniswap returned a malformed transaction value",
+            code="provider_response_malformed",
+            provider_code=_PROVIDER.value,
+        ) from error

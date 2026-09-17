@@ -31,7 +31,9 @@ __all__ = [
     "DEFAULT_ROUTING_PREFERENCE",
     "HEALTH_PROBES",
     "SUPPORTED_ROUTING_MODES",
+    "PERMIT2_ADDRESS",
     "QUOTE_PATH",
+    "SWAP_PATH",
     "ROUTING_MODES",
     "ROUTING_PREFERENCES",
     "SUPPORTED_CHAIN_IDS",
@@ -48,6 +50,15 @@ API_KEY_HEADER = "x-api-key"
 
 #: Путь получения котировки. Запрос выполняется методом POST.
 QUOTE_PATH = "/v1/quote"
+
+#: Путь сборки транзакции обмена. Принимает объект ``quote`` из ответа
+#: :data:`QUOTE_PATH` и возвращает готовый вызов роутера.
+SWAP_PATH = "/v1/swap"
+
+#: Контракт Permit2 — ему выдаётся разрешение на входной токен. Роутер
+#: списывает токены не напрямую, а через него; адрес одинаков во всех
+#: сетях. Проверено ответом API 2026-09-15: поле ``permitData.domain``.
+PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
 
 #: Сети, поддержка которых заявлена адаптером.
 SUPPORTED_CHAIN_IDS: dict[str, int] = {

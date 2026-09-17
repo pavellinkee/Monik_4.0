@@ -13,7 +13,9 @@ from decimal import Decimal
 
 import pytest
 
+from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import DataError
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import FakeHttpClient, HttpResponse
 from monik.services.observability import FakeClock
@@ -107,3 +109,65 @@ class TestUnknownIsNotZero:
 
         with pytest.raises(DataError, match="no rpc endpoint"):
             await account.native_balance(NetworkId("arbitrum"))
+
+
+class TestSimulation:
+    """Сделка проверяется вызовом узла, но никуда не отправляется."""
+
+    def _transaction(self) -> SwapTransaction:
+        quote = f.quote(output_raw=50_100_000)
+        return SwapTransaction(
+            provider_id=ProviderId.UNISWAP,
+            network_id=f.POLYGON,
+            chain_id=137,
+            to="0x" + "11" * 20,
+            data="0xdeadbeef",
+            value=0,
+            gas_limit=200_000,
+            spender="0x" + "22" * 20,
+            quote=quote,
+            min_output_raw=50_000_000,
+        )
+
+    async def test_successful_call_means_the_swap_would_pass(self) -> None:
+        clock = FakeClock(f.NOW)
+        account = _account(clock, [_result("0x" + "0" * 64)])
+
+        outcome = await account.simulate(self._transaction())
+
+        assert outcome.succeeded
+        assert outcome.revert_reason is None
+        assert outcome.describe() == "прошла бы"
+
+    async def test_revert_is_an_answer_not_a_failure(self) -> None:
+        """Отказ узла — это «сделка не прошла бы», а не сбой связи.
+
+        Именно так завышенная котировка и должна себя вести: транзакция
+        откатывается, теряется газ, деньги остаются.
+        """
+        clock = FakeClock(f.NOW)
+        account = _account(clock, [_error("execution reverted: Too little received")])
+
+        outcome = await account.simulate(self._transaction())
+
+        assert not outcome.succeeded
+        assert "Too little received" in (outcome.revert_reason or "")
+        assert "откатилась бы" in outcome.describe()
+
+    async def test_nothing_is_sent_to_the_chain(self) -> None:
+        """Проверка использует eth_call, а не отправку транзакции."""
+        clock = FakeClock(f.NOW)
+        http = FakeHttpClient([_result("0x")])
+        account = ChainAccount(
+            address=ADDRESS,
+            http=http,
+            resources=resource_manager(clock),
+            clock=clock,
+            rpc_urls={str(f.POLYGON): "https://polygon-rpc.example"},
+        )
+
+        await account.simulate(self._transaction())
+
+        methods = [call.request.json_body["method"] for call in http.calls]
+        assert methods == ["eth_call"]
+        assert "eth_sendRawTransaction" not in methods
