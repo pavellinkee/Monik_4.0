@@ -9,9 +9,11 @@ token остаётся на газ.
 что и проверка адресов токенов: для ядра это ещё один внешний ресурс с
 именем ``rpc``, а не особый случай.
 
-Приоритет у них наивысший (``the_main_rules.md``, правило 13). Это
-запросы, от которых зависят уже потраченные деньги: поиск, уступивший
-очередь, теряет один цикл, а сделка — купленный токен.
+Приоритет задаёт **вызывающая сторона**, а не этот модуль: один и тот
+же счёт обслуживает и покупку, и продажу, а у них приоритет разный
+(``the_main_rules.md``, правило 13). Продажа обгоняет покупку, покупка —
+сканирование, и решить это может только тот, кто знает, ради чего
+спрашивает.
 """
 
 from __future__ import annotations
@@ -126,6 +128,7 @@ class ChainAccount:
         clock: Clock,
         rpc_urls: dict[str, str],
         timeout_seconds: float = 5.0,
+        default_priority: RequestPriority = RequestPriority.ANN_BUY,
     ) -> None:
         self._address = address
         self._http = http
@@ -133,6 +136,9 @@ class ChainAccount:
         self._clock = clock
         self._rpc_urls = dict(rpc_urls)
         self._timeout = timedelta(seconds=timeout_seconds)
+        #: Приоритет вызовов, которым его не назвали явно. Покупка — не
+        #: самый высокий из возможных: продажа обгоняет и её.
+        self._default_priority = default_priority
 
     @property
     def address(self) -> str:
@@ -143,7 +149,9 @@ class ChainAccount:
         """Есть ли у сети узел, которому можно задать вопрос."""
         return str(network_id) in self._rpc_urls
 
-    async def token_balance(self, token: Token) -> TokenBalance:
+    async def token_balance(
+        self, token: Token, *, priority: RequestPriority | None = None
+    ) -> TokenBalance:
         """Остаток токена на счёте."""
         raw = await self._call(
             token.network_id,
@@ -151,10 +159,13 @@ class ChainAccount:
             data=_BALANCE_OF + _pad_address(self._address),
             operation=CapabilityOperation.TOKEN_METADATA,
             dedup=f"balance:{token.key}",
+            priority=priority,
         )
         return TokenBalance(token=token, raw=_parse_uint(raw, field="balanceOf"))
 
-    async def allowance(self, token: Token, spender: str) -> int:
+    async def allowance(
+        self, token: Token, spender: str, *, priority: RequestPriority | None = None
+    ) -> int:
         """Сколько роутеру разрешено списывать с нашего счёта."""
         raw = await self._call(
             token.network_id,
@@ -162,20 +173,26 @@ class ChainAccount:
             data=_ALLOWANCE + _pad_address(self._address) + _pad_address(spender),
             operation=CapabilityOperation.TOKEN_METADATA,
             dedup=f"allowance:{token.key}:{spender.lower()}",
+            priority=priority,
         )
         return _parse_uint(raw, field="allowance")
 
-    async def native_balance(self, network_id: NetworkId) -> int:
+    async def native_balance(
+        self, network_id: NetworkId, *, priority: RequestPriority | None = None
+    ) -> int:
         """Остаток native token — тот, которым платится газ."""
         raw = await self._request(
             network_id,
             method="eth_getBalance",
             params=[self._address, "latest"],
             dedup=f"native:{network_id}",
+            priority=priority,
         )
         return _parse_uint(raw, field="eth_getBalance")
 
-    async def simulate(self, transaction: SwapTransaction) -> SimulationResult:
+    async def simulate(
+        self, transaction: SwapTransaction, *, priority: RequestPriority | None = None
+    ) -> SimulationResult:
         """Проверить сделку, **не отправляя** её.
 
         Узел выполняет вызов на текущем состоянии сети и возвращает либо
@@ -208,12 +225,13 @@ class ChainAccount:
             params=params,
             dedup=f"simulate:{transaction.to}:{transaction.data[:18]}",
             allow_revert=True,
+            priority=priority,
         )
         if isinstance(outcome, _Reverted):
             return SimulationResult(succeeded=False, revert_reason=outcome.reason)
         return SimulationResult(succeeded=True)
 
-    async def nonce(self, network_id: NetworkId) -> int:
+    async def nonce(self, network_id: NetworkId, *, priority: RequestPriority | None = None) -> int:
         """Номер следующей транзакции счёта.
 
         Берётся ``pending``, а не ``latest``: иначе вторая транзакция,
@@ -225,17 +243,32 @@ class ChainAccount:
             method="eth_getTransactionCount",
             params=[self._address, "pending"],
             dedup=f"nonce:{network_id}",
+            priority=priority,
         )
         return _parse_uint(raw, field="eth_getTransactionCount")
 
-    async def gas_price(self, network_id: NetworkId) -> int:
+    async def gas_price(
+        self, network_id: NetworkId, *, priority: RequestPriority | None = None
+    ) -> int:
         """Текущая цена газа сети."""
         raw = await self._request(
-            network_id, method="eth_gasPrice", params=[], dedup=f"gasprice:{network_id}"
+            network_id,
+            method="eth_gasPrice",
+            params=[],
+            dedup=f"gasprice:{network_id}",
+            priority=priority,
         )
         return _parse_uint(raw, field="eth_gasPrice")
 
-    async def estimate_gas(self, network_id: NetworkId, *, to: str, data: str, value: int) -> int:
+    async def estimate_gas(
+        self,
+        network_id: NetworkId,
+        *,
+        to: str,
+        data: str,
+        value: int,
+        priority: RequestPriority | None = None,
+    ) -> int:
         """Сколько газа потребует вызов.
 
         Оценка делается узлом на текущем состоянии: она же служит
@@ -246,10 +279,17 @@ class ChainAccount:
             method="eth_estimateGas",
             params=[{"from": self._address, "to": to, "data": data, "value": hex(value)}],
             dedup=f"estimate:{to}:{data[:18]}",
+            priority=priority,
         )
         return _parse_uint(raw, field="eth_estimateGas")
 
-    async def send_raw(self, network_id: NetworkId, raw_transaction: bytes) -> str:
+    async def send_raw(
+        self,
+        network_id: NetworkId,
+        raw_transaction: bytes,
+        *,
+        priority: RequestPriority | None = None,
+    ) -> str:
         """Отправить подписанную транзакцию и вернуть её хеш.
 
         Это единственное место, откуда состояние цепи меняется. Всё
@@ -260,18 +300,26 @@ class ChainAccount:
             method="eth_sendRawTransaction",
             params=["0x" + raw_transaction.hex()],
             dedup="",
+            priority=priority,
         )
         if not isinstance(raw, str):
             raise DataError("rpc returned no transaction hash", code="rpc_value_missing")
         return raw
 
-    async def receipt(self, network_id: NetworkId, tx_hash: str) -> TransactionReceipt | None:
+    async def receipt(
+        self,
+        network_id: NetworkId,
+        tx_hash: str,
+        *,
+        priority: RequestPriority | None = None,
+    ) -> TransactionReceipt | None:
         """Квитанция транзакции или ``None``, если она ещё не в блоке."""
         raw = await self._request(
             network_id,
             method="eth_getTransactionReceipt",
             params=[tx_hash],
             dedup="",
+            priority=priority,
         )
         if not isinstance(raw, dict):
             return None
@@ -297,6 +345,7 @@ class ChainAccount:
         data: str,
         operation: CapabilityOperation,
         dedup: str,
+        priority: RequestPriority | None = None,
     ) -> Any:
         return await self._request(
             network_id,
@@ -304,6 +353,7 @@ class ChainAccount:
             params=[{"to": to, "data": data}, "latest"],
             dedup=dedup,
             operation=operation,
+            priority=priority,
         )
 
     async def _request(
@@ -315,6 +365,7 @@ class ChainAccount:
         dedup: str,
         operation: CapabilityOperation = CapabilityOperation.TOKEN_METADATA,
         allow_revert: bool = False,
+        priority: RequestPriority | None = None,
     ) -> Any:
         url = self._rpc_urls.get(str(network_id))
         if url is None:
@@ -330,9 +381,7 @@ class ChainAccount:
                 network_id=network_id,
                 operation=operation,
             ),
-            # Деньги проверяются перед сделкой, поэтому запрос не может
-            # ждать в общей очереди обслуживания.
-            priority=RequestPriority.EXECUTION,
+            priority=priority or self._default_priority,
             timeout=self._timeout,
             created_at=self._clock.now(),
             sequence=0,

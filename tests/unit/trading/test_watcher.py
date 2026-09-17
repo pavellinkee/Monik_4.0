@@ -525,14 +525,15 @@ class TestProceeds:
 
 
 class TestPriority:
-    """Запросы сделки обслуживаются раньше поисковых.
+    """Продажа обслуживается раньше всего остального.
 
-    ``the_main_rules.md``, правило 13. Поиск, уступивший очередь, теряет
-    один цикл; открытая сделка — купленный токен, потому что отклонение,
-    ради которого он куплен, живёт минуты.
+    ``the_main_rules.md``, правило 13. За продажей стоят уже потраченные
+    деньги: пока котировка выхода стоит в очереди, купленный токен
+    остаётся на руках, а отклонение, ради которого он куплен, живёт
+    минуты.
     """
 
-    async def test_exit_quote_is_asked_with_execution_priority(self) -> None:
+    async def test_exit_quote_is_asked_with_the_sell_priority(self) -> None:
         node = ScriptedNode()
         positions = MemoryPositions()
         watcher = _watcher(node, positions, sell_rate="10.1")
@@ -542,7 +543,7 @@ class TestPriority:
         await watcher.tick()
 
         assert adapter.quote_calls, "котировка выхода запрошена"
-        assert all(request.priority is RequestPriority.EXECUTION for request in adapter.quote_calls)
+        assert all(request.priority is RequestPriority.ANN_SELL for request in adapter.quote_calls)
 
 
 class TestSellCalibration:

@@ -16,6 +16,7 @@ from monik.domain.enums.lifecycle import ScanStatus
 from monik.domain.enums.modes import ScanMode
 from monik.domain.enums.operations import OperationType
 from monik.domain.enums.providers import ProviderId
+from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
 from monik.domain.models.opportunity import Candidate
 from monik.domain.models.scan import Scan, ScanScope
@@ -337,3 +338,30 @@ class TestCalibrationRecording:
         await executor.consider((_result(_candidate(50_000_000, "0.1")),))
 
         assert calibration.records == []
+
+
+class TestPriority:
+    """Покупка обгоняет сканирование, но уступает продаже.
+
+    ``the_main_rules.md``, правило 13. Покупка тратит деньги, но пока не
+    рискует ими: сделка ещё не открыта, и отказ стоит только упущенной
+    возможности. Продажа рискует уже потраченным, поэтому идёт первой.
+    """
+
+    async def test_every_buy_request_carries_the_buy_priority(self) -> None:
+        positions = MemoryPositions()
+        node = ScriptedNode(
+            balances={USDT_ADDRESS: 60_000_000},
+            after_send={str(f.AAVE.address).lower(): 5 * 10**18},
+        )
+        executor = _executor(node, positions)
+        adapter = executor._adapters[ProviderId.UNISWAP.value]  # noqa: SLF001
+
+        await executor.consider((_result(_candidate(50_000_000, "0.1")),))
+
+        assert adapter.quote_calls, "агрегатор опрошен"
+        assert all(request.priority is RequestPriority.ANN_BUY for request in adapter.quote_calls)
+
+    def test_buy_yields_to_sell_and_outranks_scanning(self) -> None:
+        assert RequestPriority.ANN_SELL.rank < RequestPriority.ANN_BUY.rank
+        assert RequestPriority.ANN_BUY.rank < RequestPriority.ANN_SCAN.rank

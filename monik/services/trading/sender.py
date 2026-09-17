@@ -15,6 +15,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 
+from monik.domain.enums.resources import RequestPriority
 from monik.domain.value_objects.identity import NetworkId
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
@@ -67,23 +68,28 @@ class TransactionSender:
         data: str,
         value: int = 0,
         gas_limit: int | None = None,
+        priority: RequestPriority = RequestPriority.ANN_BUY,
     ) -> SentTransaction:
         """Отправить вызов и вернуть его хеш.
 
         ``gas_limit`` можно не задавать: тогда он оценивается узлом. Эта
         же оценка служит проверкой, что вызов вообще выполним, — узел
         отказывает на том, что откатилось бы.
+
+        ``priority`` называет вызывающая сторона: отправка покупки и
+        отправка продажи обслуживаются по-разному
+        (``the_main_rules.md``, правило 13).
         """
         chain_id = self._chain_ids.get(str(network_id))
         if chain_id is None:
             raise ValueError(f"network {network_id} has no chain id configured")
         async with self._lock:
             limit = gas_limit or await self._account.estimate_gas(
-                network_id, to=to, data=data, value=value
+                network_id, to=to, data=data, value=value, priority=priority
             )
             gas = int(limit * _GAS_HEADROOM)
-            price = await self._account.gas_price(network_id)
-            nonce = await self._account.nonce(network_id)
+            price = await self._account.gas_price(network_id, priority=priority)
+            nonce = await self._account.nonce(network_id, priority=priority)
             raw = self._wallet.sign_transaction(
                 {
                     "to": to,
@@ -97,7 +103,7 @@ class TransactionSender:
                     "type": 2,
                 }
             )
-            tx_hash = await self._account.send_raw(network_id, raw)
+            tx_hash = await self._account.send_raw(network_id, raw, priority=priority)
         _LOGGER.info(
             "transaction sent",
             extra=log_fields(network=str(network_id), tx=tx_hash, gas=gas, nonce=nonce),
@@ -105,7 +111,12 @@ class TransactionSender:
         return SentTransaction(tx_hash=tx_hash, network_id=network_id, gas_limit=gas)
 
     async def wait(
-        self, sent: SentTransaction, *, timeout: timedelta, poll: timedelta
+        self,
+        sent: SentTransaction,
+        *,
+        timeout: timedelta,
+        poll: timedelta,
+        priority: RequestPriority = RequestPriority.ANN_BUY,
     ) -> TransactionReceipt | None:
         """Дождаться квитанции.
 
@@ -120,7 +131,7 @@ class TransactionSender:
         """
         attempts = max(int(timeout / poll), 1)
         for attempt in range(attempts):
-            receipt = await self._account.receipt(sent.network_id, sent.tx_hash)
+            receipt = await self._account.receipt(sent.network_id, sent.tx_hash, priority=priority)
             if receipt is not None:
                 return receipt
             if attempt + 1 < attempts:

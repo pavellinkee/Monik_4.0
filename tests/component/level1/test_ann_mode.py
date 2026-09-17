@@ -18,6 +18,7 @@ import pytest
 
 from monik.config import parse_configuration
 from monik.domain.enums.modes import ScanMode
+from monik.domain.enums.resources import RequestPriority
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.db import Database
 from monik.services.observability import FakeClock
@@ -260,3 +261,60 @@ class TestModeTimeout:
 
         with pytest.raises(Exception, match="shortest enabled mode interval"):
             parse_configuration(document, environ=dict(VALID_ENV))
+
+
+class TestModePriorities:
+    """Правило приоритета принадлежит режиму, а не системе целиком.
+
+    ``the_main_rules.md``, правило 13. У ``ur`` и ``fest`` работа делится
+    на поиск и подтверждение, у ``ann`` — на сканирование, покупку и
+    продажу. Общего порядка для них не существует, поэтому каждый режим
+    ставит свой.
+    """
+
+    def _document(self) -> dict[str, Any]:
+        document = _stable_document()
+        document["scanner"]["modes"] = {
+            "ur": {"enabled": True, "interval_seconds": 300},
+            "ann": {"enabled": True, "interval_seconds": 30},
+        }
+        document["scanner"]["level1"] = {"amount": "50", "scan_timeout_seconds": 30}
+        return document
+
+    async def test_trading_scan_asks_with_its_own_priority(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        """Сканирование ann не называется ни Level 1, ни Level 2."""
+        harness = _harness(self._document(), database, clock)
+
+        await harness.scanner.scan_all(ScanMode.ANN)
+
+        asked = {
+            request.priority
+            for adapter in harness.adapters.values()
+            for request in adapter.quote_calls
+        }
+        assert asked == {RequestPriority.ANN_SCAN}
+
+    async def test_search_mode_keeps_the_priorities_it_had(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        """У ur ничего не изменилось: SELL по-прежнему обгоняет BUY."""
+        harness = _harness(self._document(), database, clock)
+
+        await harness.scanner.scan_all(ScanMode.UR)
+
+        asked = {
+            request.priority
+            for adapter in harness.adapters.values()
+            for request in adapter.quote_calls
+        }
+        assert asked <= {RequestPriority.LEVEL1_BUY, RequestPriority.LEVEL1_SELL}
+        assert RequestPriority.ANN_SCAN not in asked
+
+    async def test_trading_scan_yields_to_the_search_modes(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        """Обслуживание ur и fest осталось таким, каким было до ann."""
+        assert RequestPriority.ANN_SCAN.rank > RequestPriority.LEVEL1_BUY.rank
+        assert RequestPriority.ANN_SCAN.rank > RequestPriority.LEVEL2.rank

@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 
 from monik.domain.enums.providers import ProviderId
+from monik.domain.enums.resources import RequestPriority
 from monik.domain.errors import DataError
 from monik.domain.models.execution import (
     AllowanceKind,
@@ -27,6 +28,7 @@ from monik.services.trading import ChainAccount
 from monik.services.trading.chain import UNLIMITED_ALLOWANCE
 from tests import factories as f
 from tests.unit.providers.support import resource_manager
+from tests.unit.trading.support import RPC_URL, ScriptedNode
 
 ADDRESS = "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
 ROUTER = "0xA51afAFe0263b40EdaEf0Df8781eA9aa03E381a3"
@@ -225,3 +227,52 @@ class TestWaiting:
         receipt = await sender.wait(sent, timeout=timedelta(seconds=6), poll=timedelta(seconds=3))
 
         assert receipt is None, "остановились, хотя часы не шли"
+
+
+class TestPriority:
+    """Приоритет задаёт вызывающая сторона, а не сам счёт.
+
+    Один и тот же счёт обслуживает и покупку, и продажу, а у них
+    приоритет разный (``the_main_rules.md``, правило 13). Решить, ради
+    чего задан вопрос, может только тот, кто его задаёт.
+    """
+
+    class _Recorder:
+        """Менеджер ресурсов, запоминающий поданные заявки."""
+
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+            self.priorities: list[RequestPriority] = []
+
+        async def execute(self, request: object, operation: object):  # noqa: ANN202
+            self.priorities.append(request.priority)  # type: ignore[attr-defined]
+            return await self._inner.execute(request, operation)  # type: ignore[attr-defined]
+
+    def _account(self, node: ScriptedNode, clock: FakeClock, recorder: object) -> ChainAccount:
+        return ChainAccount(
+            address="0x" + "11" * 20,
+            http=FakeHttpClient(handler=node),
+            resources=recorder,  # type: ignore[arg-type]
+            clock=clock,
+            rpc_urls={str(f.POLYGON): RPC_URL},
+        )
+
+    async def test_the_caller_chooses_the_priority(self) -> None:
+        clock = FakeClock(f.NOW)
+        recorder = self._Recorder(resource_manager(clock))
+        account = self._account(ScriptedNode(), clock, recorder)
+
+        await account.gas_price(f.POLYGON, priority=RequestPriority.ANN_SELL)
+        await account.gas_price(f.POLYGON, priority=RequestPriority.ANN_BUY)
+
+        assert recorder.priorities == [RequestPriority.ANN_SELL, RequestPriority.ANN_BUY]
+
+    async def test_unnamed_priority_falls_back_to_the_buy_one(self) -> None:
+        """Покупка — не самый высокий приоритет: продажа обгоняет и её."""
+        clock = FakeClock(f.NOW)
+        recorder = self._Recorder(resource_manager(clock))
+        account = self._account(ScriptedNode(), clock, recorder)
+
+        await account.gas_price(f.POLYGON)
+
+        assert recorder.priorities == [RequestPriority.ANN_BUY]

@@ -48,6 +48,10 @@ __all__ = ["TradeExecutor"]
 
 _LOGGER = get_logger("services.trading.executor")
 
+#: Приоритет всех обращений покупки: она обгоняет сканирование, но
+#: уступает продаже (``the_main_rules.md``, правило 13).
+_PRIORITY = RequestPriority.ANN_BUY
+
 #: Последовательность сделок.
 POSITION_SEQUENCE = "position"
 
@@ -180,7 +184,7 @@ class TradeExecutor:
         одни и те же деньги были бы вложены дважды.
         """
         base = self._tokens.base_token(network_id)
-        balance = await self._account.token_balance(base)
+        balance = await self._account.token_balance(base, priority=_PRIORITY)
         reserved = await self._positions.reserved_raw_input(network_id)
         return max(balance.raw - reserved, 0)
 
@@ -206,7 +210,7 @@ class TradeExecutor:
         sell = await self._build_exit(choice, adapter)
         if sell is None:
             return True
-        price = await self._account.gas_price(choice.base.network_id)
+        price = await self._account.gas_price(choice.base.network_id, priority=_PRIORITY)
         exact_raw = await self._costs.to_base_raw(
             choice.base.network_id,
             choice.base,
@@ -261,7 +265,7 @@ class TradeExecutor:
                     input_amount=choice.candidate.buy_quote.output_amount,
                     request_id=RequestId.generate(),
                     slippage_bps=self._slippage_bps,
-                    priority=RequestPriority.EXECUTION,
+                    priority=RequestPriority.ANN_BUY,
                 )
             )
         except Exception as error:  # noqa: BLE001 - уточнение не обязано удаваться
@@ -291,12 +295,12 @@ class TradeExecutor:
                 slippage_bps=self._slippage_bps,
                 # Сделка обслуживается раньше поиска
                 # (``the_main_rules.md``, правило 13).
-                priority=RequestPriority.EXECUTION,
+                priority=RequestPriority.ANN_BUY,
             )
         )
         if not await self._costs_allow(choice, adapter, transaction):
             return None
-        simulation = await self._account.simulate(transaction)
+        simulation = await self._account.simulate(transaction, priority=_PRIORITY)
         if not simulation.succeeded:
             _LOGGER.warning(
                 "trade cancelled: the swap would revert",
@@ -304,7 +308,7 @@ class TradeExecutor:
             )
             return None
 
-        before = await self._account.token_balance(choice.target)
+        before = await self._account.token_balance(choice.target, priority=_PRIORITY)
         sequence = await self._sequences.next_value(POSITION_SEQUENCE)
         now = self._clock.now()
         position = Position(
@@ -338,6 +342,7 @@ class TradeExecutor:
             data=transaction.data,
             value=transaction.value,
             gas_limit=transaction.gas_limit,
+            priority=_PRIORITY,
         )
         position = position.model_copy(
             update={"buy_tx_hash": sent.tx_hash, "updated_at": self._clock.now()}
@@ -349,7 +354,7 @@ class TradeExecutor:
         )
 
         receipt = await self._sender.wait(
-            sent, timeout=self._receipt_timeout, poll=self._receipt_poll
+            sent, timeout=self._receipt_timeout, poll=self._receipt_poll, priority=_PRIORITY
         )
         if receipt is None:
             # Квитанции ещё нет — сделка остаётся в BUYING, и наблюдатель
@@ -400,7 +405,7 @@ class TradeExecutor:
                 extra=log_fields(t_id=str(position.t_id), tx=position.buy_tx_hash or ""),
             )
             return updated
-        after = await self._account.token_balance(position.target_token)
+        after = await self._account.token_balance(position.target_token, priority=_PRIORITY)
         acquired = after.raw - (position.raw_target_before_buy or 0)
         updated = position.model_copy(
             update={

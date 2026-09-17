@@ -41,11 +41,21 @@ _LOGGER = get_logger("services.level1.quotes")
 #: корректно, поэтому повторять запрос в следующем цикле смысла мало.
 _NEGATIVE_ROUTE_CATEGORIES = frozenset({ErrorCategory.NO_ROUTE, ErrorCategory.ROUTE_REJECTED})
 
-#: Приоритет запроса по направлению. Готовая SELL-проверка обслуживается
-#: раньше незавершённой BUY-проверки (``CLAUDE.md`` §15).
-_PRIORITIES: dict[OperationType, RequestPriority] = {
+#: Приоритет запроса по направлению в режимах поиска. Готовая
+#: SELL-проверка обслуживается раньше незавершённой BUY-проверки
+#: (``CLAUDE.md`` §15).
+SEARCH_PRIORITIES: dict[OperationType, RequestPriority] = {
     OperationType.BUY: RequestPriority.LEVEL1_BUY,
     OperationType.SELL: RequestPriority.LEVEL1_SELL,
+}
+
+#: Приоритет запроса в торговом режиме. Разделения на ноги здесь нет: у
+#: ``ann`` нет ни Level 1, ни Level 2, а есть сканирование, покупка и
+#: продажа — и всё сканирование целиком уступает и покупке, и продаже
+#: (``the_main_rules.md``, правило 13).
+ANN_PRIORITIES: dict[OperationType, RequestPriority] = {
+    OperationType.BUY: RequestPriority.ANN_SCAN,
+    OperationType.SELL: RequestPriority.ANN_SCAN,
 }
 
 
@@ -102,6 +112,7 @@ class QuoteCollector:
         max_concurrent: int,
         no_route: NoRouteMemory,
         request_timeout: timedelta | None = None,
+        priorities: dict[OperationType, RequestPriority] | None = None,
     ) -> None:
         self._adapters = adapters
         self._clock = clock
@@ -110,6 +121,10 @@ class QuoteCollector:
         self._max_age = max_age
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._request_timeout = request_timeout
+        #: Приоритет обслуживания зависит от режима, а не от сборщика:
+        #: одни и те же котировки в поиске и в торговом проходе стоят в
+        #: очереди по-разному.
+        self._priorities = dict(priorities or SEARCH_PRIORITIES)
         self.statistics = QuoteStatistics()
 
     async def fetch(
@@ -131,7 +146,7 @@ class QuoteCollector:
             output_token=output_token,
             input_amount=input_amount,
             request_id=RequestId.generate(),
-            priority=_PRIORITIES[operation],
+            priority=self._priorities[operation],
             timeout=self._request_timeout,
         )
         with log_context(

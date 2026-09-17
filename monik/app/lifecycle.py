@@ -395,7 +395,12 @@ def build_application(
                 mode=TaskMode.INTERVAL,
                 interval_seconds=config.scanner.modes.for_mode(mode).interval_seconds,
             ),
-            priority=RequestPriority.LEVEL1_BUY,
+            # Правило приоритета принадлежит режиму: сканирование ann
+            # уступает и его покупке, и его продаже, а поиск ur и fest
+            # остаётся ровно там, где был (``the_main_rules.md``, правило 13).
+            priority=(
+                RequestPriority.ANN_SCAN if mode is ScanMode.ANN else RequestPriority.LEVEL1_BUY
+            ),
             timeout=timedelta(seconds=config.scanner.scan_timeout_for(mode)),
         )
     if container.watcher is not None:

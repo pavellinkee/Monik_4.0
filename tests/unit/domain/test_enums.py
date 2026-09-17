@@ -98,22 +98,65 @@ def test_provider_set_matches_approved_providers() -> None:
     }
 
 
-def test_priority_order_is_execution_first() -> None:
-    """Исполнение > Level 2 > Level 1 SELL > Level 1 BUY > Maintenance.
+def test_search_modes_keep_their_original_order() -> None:
+    """У ``ur`` и ``fest`` порядок прежний (``CLAUDE.md`` §15).
 
-    ``CLAUDE.md`` §15 в редакции ``the_main_rules.md``, правило 13: запросы
-    подсистемы исполнения обслуживаются раньше любых поисковых. Поиск,
-    уступивший очередь, теряет один цикл; сделка — купленный токен.
+    Появление торгового режима не должно было его тронуть: правило
+    приоритета принадлежит режиму (``the_main_rules.md``, правило 13).
     """
-    ordered = sorted(RequestPriority, key=lambda p: p.rank)
-    assert ordered == [
-        RequestPriority.EXECUTION,
+    search = [
         RequestPriority.LEVEL2,
         RequestPriority.LEVEL1_SELL,
         RequestPriority.LEVEL1_BUY,
         RequestPriority.MAINTENANCE,
         RequestPriority.BACKGROUND,
     ]
+
+    assert sorted(search, key=lambda p: p.rank) == search
+
+
+def test_trading_mode_orders_sell_before_buy_before_scanning() -> None:
+    """У ``ann`` нет Level 1 и Level 2 — есть продажа, покупка и поиск.
+
+    Порядок обратен их последовательности во времени: за продажей стоят
+    уже потраченные деньги, покупка их только тратит, а сканирование,
+    уступив очередь, теряет один цикл.
+    """
+    ann = [
+        RequestPriority.ANN_SELL,
+        RequestPriority.ANN_BUY,
+        RequestPriority.ANN_SCAN,
+    ]
+
+    assert sorted(ann, key=lambda p: p.rank) == ann
+
+
+def test_trading_requests_outrank_every_search_request() -> None:
+    """Любой запрос продажи и покупки обгоняет любой поисковый."""
+    search = (
+        RequestPriority.LEVEL2,
+        RequestPriority.LEVEL1_SELL,
+        RequestPriority.LEVEL1_BUY,
+    )
+
+    for trading in (RequestPriority.ANN_SELL, RequestPriority.ANN_BUY):
+        assert all(trading.rank < other.rank for other in search)
+
+
+def test_trading_scan_never_delays_the_search_modes() -> None:
+    """Сканирование ``ann`` поставлено ниже поиска ``ur`` и ``fest``.
+
+    Так их обслуживание остаётся ровно таким, каким было до появления
+    торгового режима.
+    """
+    assert all(
+        RequestPriority.ANN_SCAN.rank > other.rank
+        for other in (
+            RequestPriority.LEVEL2,
+            RequestPriority.LEVEL1_SELL,
+            RequestPriority.LEVEL1_BUY,
+        )
+    )
 
 
 def test_priority_ranks_are_unique() -> None:

@@ -8,28 +8,47 @@ from monik.domain.enums.base import DomainEnum
 class RequestPriority(DomainEnum):
     """Приоритет запроса к внешнему ресурсу.
 
-    Порядок обслуживания (``CLAUDE.md`` §15, ``05_RESOURCE_MANAGER.md`` §16-20
-    в редакции ``the_main_rules.md``, правило 13):
+    Правило приоритета принадлежит **режиму**, а не системе целиком
+    (``the_main_rules.md``, правило 13): у режимов разный состав работы, и
+    общего порядка для них не существует.
 
-    ``EXECUTION`` > ``LEVEL2`` > ``LEVEL1_SELL`` > ``LEVEL1_BUY`` >
-    ``MAINTENANCE`` > ``BACKGROUND``.
+    ``ur`` и ``fest`` ищут и подтверждают, поэтому их порядок прежний
+    (``CLAUDE.md`` §15, ``05_RESOURCE_MANAGER.md`` §16-20):
 
-    ``EXECUTION`` стоит выше всего остального, потому что это единственные
-    запросы, от которых зависят уже потраченные деньги. Поиск, уступивший
-    очередь, теряет один цикл; сделка, уступившая очередь, держит купленный
-    токен дольше, чем живёт отклонение, ради которого он куплен.
+    ``LEVEL2`` > ``LEVEL1_SELL`` > ``LEVEL1_BUY``.
+
+    У ``ann`` нет ни Level 1, ни Level 2. У него три занятия — продажа,
+    покупка и сканирование, — и порядок между ними обратен их
+    последовательности во времени:
+
+    ``ANN_SELL`` > ``ANN_BUY`` > ``ANN_SCAN``.
+
+    Продажа первая, потому что за ней стоят уже потраченные деньги:
+    задержка держит купленный токен дольше, чем живёт отклонение, ради
+    которого он куплен. Покупка вторая: она деньги тратит, но пока не
+    рискует ими. Сканирование последнее — уступив очередь, оно теряет
+    один цикл и найдёт то же самое через десять секунд.
+
+    Между режимами продажа и покупка ``ann`` стоят выше всего: это
+    единственная работа, чья задержка стоит денег. Сканирование ``ann``,
+    наоборот, поставлено **ниже** поиска ``ur`` и ``fest`` — так их
+    обслуживание остаётся ровно таким, каким было до появления ``ann``.
 
     Прибыльность возможности **не** влияет на приоритет
     (``04_SCHEDULER.md`` §26): выше ставится род работы, а не её ожидаемый
     доход.
     """
 
-    #: Запросы подсистемы исполнения: сборка сделки, проверка узлом,
-    #: котировка выхода у открытой позиции.
-    EXECUTION = "execution"
+    #: Продажа режима ``ann``: котировка выхода, сборка, проверка узлом,
+    #: отправка и квитанция.
+    ANN_SELL = "ann_sell"
+    #: Покупка режима ``ann``: всё то же самое для входа в сделку.
+    ANN_BUY = "ann_buy"
     LEVEL2 = "level2"
     LEVEL1_SELL = "level1_sell"
     LEVEL1_BUY = "level1_buy"
+    #: Сканирование режима ``ann``.
+    ANN_SCAN = "ann_scan"
     MAINTENANCE = "maintenance"
     BACKGROUND = "background"
 
@@ -44,12 +63,14 @@ class RequestPriority(DomainEnum):
 
 
 _PRIORITY_RANKS: dict[RequestPriority, int] = {
-    RequestPriority.EXECUTION: 0,
-    RequestPriority.LEVEL2: 1,
-    RequestPriority.LEVEL1_SELL: 2,
-    RequestPriority.LEVEL1_BUY: 3,
-    RequestPriority.MAINTENANCE: 4,
-    RequestPriority.BACKGROUND: 5,
+    RequestPriority.ANN_SELL: 0,
+    RequestPriority.ANN_BUY: 1,
+    RequestPriority.LEVEL2: 2,
+    RequestPriority.LEVEL1_SELL: 3,
+    RequestPriority.LEVEL1_BUY: 4,
+    RequestPriority.ANN_SCAN: 5,
+    RequestPriority.MAINTENANCE: 6,
+    RequestPriority.BACKGROUND: 7,
 }
 
 

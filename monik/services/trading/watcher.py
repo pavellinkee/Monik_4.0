@@ -48,6 +48,10 @@ __all__ = ["LongWaitNotice", "PositionWatcher"]
 
 _LOGGER = get_logger("services.trading.watcher")
 
+#: Приоритет всех обращений продажи — наивысший в системе. За продажей
+#: стоят уже потраченные деньги (``the_main_rules.md``, правило 13).
+_PRIORITY = RequestPriority.ANN_SELL
+
 
 class LongWaitNotice:
     """Что сообщить оператору о затянувшейся сделке."""
@@ -159,7 +163,11 @@ class PositionWatcher:
         """Подобрать покупку, квитанция которой ещё не пришла."""
         if position.buy_tx_hash is None:
             return
-        receipt = await self._account.receipt(position.network_id, position.buy_tx_hash)
+        # Подбор покупки — работа покупки, а не продажи: приоритет тот же,
+        # с которым эта транзакция отправлялась.
+        receipt = await self._account.receipt(
+            position.network_id, position.buy_tx_hash, priority=RequestPriority.ANN_BUY
+        )
         if receipt is None:
             return
         await self._executor.settle_buy(position, succeeded=receipt.succeeded, receipt=receipt)
@@ -168,7 +176,9 @@ class PositionWatcher:
         """Подобрать продажу, квитанция которой ещё не пришла."""
         if position.sell_tx_hash is None:
             return
-        receipt = await self._account.receipt(position.network_id, position.sell_tx_hash)
+        receipt = await self._account.receipt(
+            position.network_id, position.sell_tx_hash, priority=_PRIORITY
+        )
         if receipt is None:
             return
         now = self._clock.now()
@@ -218,7 +228,7 @@ class PositionWatcher:
                 )
             )
             return
-        after = await self._account.token_balance(position.base_token)
+        after = await self._account.token_balance(position.base_token, priority=_PRIORITY)
         # Выручка — это прирост остатка, а не сам остаток: на счёте лежат
         # и деньги, к этой сделке отношения не имеющие.
         returned = after.raw - position.raw_base_before_sell
@@ -280,9 +290,9 @@ class PositionWatcher:
             request_id=RequestId.generate(),
             slippage_bps=self._slippage_bps,
             # Открытая сделка ждать не может: пока котировка выхода стоит
-            # в очереди за поиском, купленный токен остаётся на руках
+            # в очереди, купленный токен остаётся на руках
             # (``the_main_rules.md``, правило 13).
-            priority=RequestPriority.EXECUTION,
+            priority=_PRIORITY,
         )
         quote = await adapter.get_quote(request)
         gross = position.profit_if_sold_for(quote.output_amount.raw)
@@ -312,7 +322,7 @@ class PositionWatcher:
         Предел газа берётся у агрегатора — он же поедет в транзакцию,
         поэтому отдельная оценка узлом не нужна.
         """
-        price = await self._account.gas_price(position.network_id)
+        price = await self._account.gas_price(position.network_id, priority=_PRIORITY)
         total_wei = _total_wei(
             position.buy_gas_wei, position.sell_gas_wei, transaction.gas_limit * price
         )
@@ -376,7 +386,7 @@ class PositionWatcher:
         стоимость выхода, и собирать второй раз значило бы потратить
         лишний запрос на то же самое.
         """
-        simulation = await self._account.simulate(transaction)
+        simulation = await self._account.simulate(transaction, priority=_PRIORITY)
         if not simulation.succeeded:
             _LOGGER.warning(
                 "exit postponed: the swap would revert",
@@ -386,13 +396,14 @@ class PositionWatcher:
         # Остаток до продажи запоминается перед отправкой: выручка —
         # это прирост, и прирост должен быть досчитан даже если квитанцию
         # подберёт уже другой процесс.
-        before = await self._account.token_balance(position.base_token)
+        before = await self._account.token_balance(position.base_token, priority=_PRIORITY)
         sent: SentTransaction = await self._sender.send(
             position.network_id,
             to=transaction.to,
             data=transaction.data,
             value=transaction.value,
             gas_limit=transaction.gas_limit,
+            priority=_PRIORITY,
         )
         selling = position.model_copy(
             update={
@@ -404,7 +415,7 @@ class PositionWatcher:
         )
         await self._positions.update(selling)
         receipt = await self._sender.wait(
-            sent, timeout=self._receipt_timeout, poll=self._receipt_poll
+            sent, timeout=self._receipt_timeout, poll=self._receipt_poll, priority=_PRIORITY
         )
         if receipt is not None:
             await self._settle_pending_sell(selling)
