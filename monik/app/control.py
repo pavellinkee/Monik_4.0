@@ -22,8 +22,7 @@ import asyncio
 from monik.domain.enums.control import ScannerRunState
 from monik.services.observability.logging import get_logger, log_fields
 
-__all__ = ["RESTART_EXIT_CODE", "ScannerSwitch"    "TradingSwitch",
-]
+__all__ = ["RESTART_EXIT_CODE", "ScannerSwitch", "TradingSwitch"]
 
 _LOGGER = get_logger("app.control")
 
