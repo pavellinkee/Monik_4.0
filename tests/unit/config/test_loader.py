@@ -491,3 +491,26 @@ class TestScheduledIntervalSource:
         }
         with pytest.raises(ConfigurationError, match="interval"):
             _load(document, env)
+
+
+class TestModeWiring:
+    """Добавление режима не должно требовать правок в центральных списках.
+
+    Дважды подряд служба не поднималась ровно по этой причине: сборщик
+    секретов и таблица расписаний перечисляли известные места руками, и
+    новую подсистему в них не внесли. Тесты фиксируют, что оба места
+    теперь строятся из самого набора.
+    """
+
+    def test_every_mode_has_a_default_schedule(self) -> None:
+        from monik.app.lifecycle import _DEFAULT_SCHEDULES, scan_task_name
+
+        for mode in ScanMode:
+            assert scan_task_name(mode) in _DEFAULT_SCHEDULES
+
+    def test_every_mode_has_an_interval_source(self) -> None:
+        """Период задачи режима берётся из настройки этого режима."""
+        from monik.config.root import _INTERVAL_SOURCES
+
+        for mode in ScanMode:
+            assert f"scan_{mode.value}" in _INTERVAL_SOURCES

@@ -96,10 +96,18 @@ _SATURDAY = 6
 #: Расписания по умолчанию. Пользовательская конфигурация имеет приоритет
 #: (``14_SCHEDULER.md`` §58-59).
 _DEFAULT_SCHEDULES: dict[str, TaskScheduleConfig] = {
-    "scan_ur": TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=300),
-    # Учащённый проход по стабильным токенам. Период задаётся настройкой
-    # подсистемы (scanner.level1.stable_scan) и здесь не дублируется.
-    "scan_fest": TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=30),
+    # Задача на каждый режим строится из самого набора режимов, а не
+    # перечисляется руками: список пришлось бы пополнять при добавлении
+    # режима, и однажды его не пополнили — служба не поднялась.
+    #
+    # Период здесь условный: действующий берётся из настройки режима
+    # (scanner.modes) и в расписании не дублируется.
+    **{
+        f"scan_{mode.value}": TaskScheduleConfig(
+            mode=TaskMode.INTERVAL, interval_seconds=300
+        )
+        for mode in ScanMode
+    },
     TASK_NOTIFICATIONS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=10),
     TASK_TELEGRAM_COMMANDS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=5),
     TASK_CAPABILITY_LOAD: TaskScheduleConfig(mode=TaskMode.STARTUP),
