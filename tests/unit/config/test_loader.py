@@ -502,11 +502,17 @@ class TestModeWiring:
     теперь строятся из самого набора.
     """
 
-    def test_every_mode_has_a_default_schedule(self) -> None:
+    def test_mode_period_lives_only_in_the_mode_settings(self) -> None:
+        """Период режима не дублируется в таблице расписаний.
+
+        Дубль означал бы, что режим, не упомянутый в scheduler.tasks,
+        молча идёт с чужим темпом: ann так и пошёл раз в пять минут
+        вместо тридцати секунд.
+        """
         from monik.app.lifecycle import _DEFAULT_SCHEDULES, scan_task_name
 
         for mode in ScanMode:
-            assert scan_task_name(mode) in _DEFAULT_SCHEDULES
+            assert scan_task_name(mode) not in _DEFAULT_SCHEDULES
 
     def test_every_mode_has_an_interval_source(self) -> None:
         """Период задачи режима берётся из настройки этого режима."""

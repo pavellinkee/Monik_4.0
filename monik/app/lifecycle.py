@@ -96,18 +96,11 @@ _SATURDAY = 6
 #: Расписания по умолчанию. Пользовательская конфигурация имеет приоритет
 #: (``14_SCHEDULER.md`` §58-59).
 _DEFAULT_SCHEDULES: dict[str, TaskScheduleConfig] = {
-    # Задача на каждый режим строится из самого набора режимов, а не
-    # перечисляется руками: список пришлось бы пополнять при добавлении
-    # режима, и однажды его не пополнили — служба не поднялась.
-    #
-    # Период здесь условный: действующий берётся из настройки режима
-    # (scanner.modes) и в расписании не дублируется.
-    **{
-        f"scan_{mode.value}": TaskScheduleConfig(
-            mode=TaskMode.INTERVAL, interval_seconds=300
-        )
-        for mode in ScanMode
-    },
+    # Задач режимов здесь нет намеренно: их период известен только из
+    # настройки самого режима (scanner.modes) и подставляется при
+    # регистрации. Значение по умолчанию в этой таблице означало бы, что
+    # период живёт в двух местах, и режим, не упомянутый в
+    # scheduler.tasks, пошёл бы с чужим темпом.
     TASK_NOTIFICATIONS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=10),
     TASK_TELEGRAM_COMMANDS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=5),
     TASK_CAPABILITY_LOAD: TaskScheduleConfig(mode=TaskMode.STARTUP),
@@ -387,13 +380,18 @@ def build_application(
         priority=RequestPriority.MAINTENANCE,
     )
     # По задаче на включённый режим: у каждого свой темп и своя планка,
-    # поэтому и расписание у каждого своё.
+    # поэтому и расписание у каждого своё. Период берётся из настройки
+    # режима и в расписании не дублируется — иначе задача, не упомянутая
+    # в scheduler.tasks, молча пошла бы с чужим темпом.
     for mode in config.scanner.modes.enabled_modes():
         registry.register(
             scan_task_name(mode),
             _scan_task(container, mode),
             config=config.scheduler,
-            default=_DEFAULT_SCHEDULES[scan_task_name(mode)],
+            default=TaskScheduleConfig(
+                mode=TaskMode.INTERVAL,
+                interval_seconds=config.scanner.modes.for_mode(mode).interval_seconds,
+            ),
             priority=RequestPriority.LEVEL1_BUY,
             timeout=timedelta(seconds=config.scanner.level1.scan_timeout_seconds),
         )
