@@ -27,9 +27,14 @@ __all__ = ["TradingConfig"]
 class TradingConfig(ConfigSection):
     """Параметры исполнения сделок."""
 
-    #: Разрешено ли отправлять транзакции. Выключено — режим ``ann``
+    #: Разрешено ли **отправлять транзакции**. Выключено — режим ``ann``
     #: только ищет и записывает найденное в журнал.
-    enabled: bool = False
+    #:
+    #: Поле намеренно называется не ``enabled``: обход конфигурации
+    #: пропускает выключенные секции вместе с их секретами, а ключ нужен
+    #: и при выключенной торговле — чтобы читать балансы счёта в сухом
+    #: прогоне.
+    execution_enabled: bool = False
     #: Ссылка на приватный ключ торгового счёта.
     private_key: SecretRef | None = None
 
@@ -71,7 +76,7 @@ class TradingConfig(ConfigSection):
         первой же сделке — то есть ровно тогда, когда возможность уже
         найдена и время дорого.
         """
-        if self.enabled and self.private_key is None:
+        if self.execution_enabled and self.private_key is None:
             raise ValueError(
                 "trading is enabled but no private_key reference is configured: "
                 "execution would fail at the first opportunity"

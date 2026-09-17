@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from monik.config.root import Configuration
 from monik.config.secrets import SecretRef, SecretResolver, SecretStore
@@ -155,18 +155,45 @@ def _apply_env_overrides(document: dict[str, Any], environ: dict[str, str]) -> l
 
 
 def _collect_secret_refs(config: Configuration) -> list[tuple[SecretRef, str]]:
-    """Собрать все секрет-ссылки активной конфигурации с их контекстом."""
+    """Собрать все секрет-ссылки активной конфигурации с их контекстом.
+
+    Модель обходится целиком, а не по списку известных мест. Список
+    пришлось бы пополнять при каждой новой подсистеме, и однажды его не
+    пополнили: ключ торгового счёта остался неразрешённым, а служба
+    упала на старте с жалобой на незаданную переменную, которая на самом
+    деле была задана.
+
+    Выключенная часть конфигурации пропускается вместе со своими
+    секретами: отключённому провайдеру ключ не нужен, и требовать его
+    значило бы запрещать выключать провайдера, не удаляя переменную.
+    Признак — поле ``enabled`` у самой секции; секция без такого поля
+    считается действующей.
+    """
     refs: list[tuple[SecretRef, str]] = []
-    for provider in config.enabled_providers:
-        if provider.api_key is not None:
-            refs.append((provider.api_key, f"provider {provider.provider_id.value} api_key"))
-    telegram = config.notifications.telegram
-    if telegram.enabled:
-        if telegram.bot_token is not None:
-            refs.append((telegram.bot_token, "telegram bot_token"))
-        if telegram.chat_id is not None:
-            refs.append((telegram.chat_id, "telegram chat_id"))
+    _walk_for_secrets(config, path=(), refs=refs)
     return refs
+
+
+def _walk_for_secrets(
+    value: Any, *, path: tuple[str, ...], refs: list[tuple[SecretRef, str]]
+) -> None:
+    """Обойти модель и собрать ссылки на секреты действующих частей."""
+    if isinstance(value, SecretRef):
+        refs.append((value, " ".join(path) or value.env))
+        return
+    if isinstance(value, BaseModel):
+        if getattr(value, "enabled", True) is False:
+            return
+        for name in type(value).model_fields:
+            _walk_for_secrets(getattr(value, name), path=(*path, name), refs=refs)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _walk_for_secrets(item, path=(*path, str(key)), refs=refs)
+        return
+    if isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            _walk_for_secrets(item, path=(*path, str(index)), refs=refs)
 
 
 def parse_configuration(

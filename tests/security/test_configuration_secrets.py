@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from monik.config import configuration_diagnostics, parse_configuration
+from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import ConfigurationError
 from monik.services.observability.redaction import REDACTED, SecretRegistry
 from tests.unit.config.conftest import USDT_ADDRESS, base_document
@@ -119,3 +120,49 @@ def test_tests_never_target_production_database_path(repo_root: Any) -> None:
         source = path.read_text(encoding="utf-8")
         for marker in forbidden:
             assert marker not in source, f"{path.name} references production database {marker}"
+
+
+def test_every_secret_reference_is_resolved_wherever_it_lives(
+    document: dict[str, Any],
+) -> None:
+    """Ссылка на секрет разрешается в любой части конфигурации.
+
+    Раньше сборщик перечислял только провайдеров и Telegram, и новая
+    подсистема в список не попала: ключ остался неразрешённым, а служба
+    упала на старте с жалобой на незаданную переменную, которая на самом
+    деле была задана. Теперь модель обходится целиком.
+    """
+    document["trading"] = {
+        "execution_enabled": False,
+        "private_key": {"env": "MONIK_TRADING_PRIVATE_KEY"},
+    }
+    environ = dict(ENV) | {"MONIK_TRADING_PRIVATE_KEY": "0x" + "11" * 32}
+
+    loaded = parse_configuration(document, environ=environ, registry=SecretRegistry())
+
+    reference = loaded.config.trading.private_key
+    assert reference is not None
+    assert loaded.secrets.has(reference), "ключ подсистемы обязан быть разрешён"
+
+
+def test_secrets_of_a_disabled_section_are_not_required(
+    document: dict[str, Any],
+) -> None:
+    """Выключенному провайдеру ключ не нужен.
+
+    Иначе выключить провайдера можно было бы только вместе с удалением
+    переменной окружения, и обратное включение требовало бы её вернуть.
+    """
+    document["providers"].append(
+        {
+            "provider_id": "uniswap",
+            "enabled": False,
+            "api_key": {"env": "MONIK_UNISWAP_API_KEY"},
+            "supported_networks": ["polygon"],
+        }
+    )
+
+    loaded = parse_configuration(document, environ=dict(ENV), registry=SecretRegistry())
+
+    assert loaded.config.provider(ProviderId.UNISWAP) is not None
+    assert "MONIK_UNISWAP_API_KEY" not in dict(ENV), "переменной нет — и она не понадобилась"
