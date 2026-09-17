@@ -75,7 +75,7 @@ def _watcher(
         sender=sender,
         tokens=_tokens(),
         clock=active,
-        execution_enabled=True,
+        is_execution_open=lambda: True,
         slippage_bps=10,
         receipt_timeout_seconds=1,
         receipt_poll_seconds=1,

@@ -110,7 +110,7 @@ def _executor(
         sender=build_sender(node, clock, wallet),
         tokens=_tokens(),
         clock=clock,
-        execution_enabled=execution_enabled,
+        is_execution_open=lambda: execution_enabled,
         slippage_bps=10,
         receipt_timeout_seconds=1,
         receipt_poll_seconds=1,

@@ -55,6 +55,11 @@ class CommandName(StrEnum):
     STOP_SCANNER = "stop"
     #: Перезапустить процесс.
     RESTART = "restart"
+    #: Разрешить подсистеме исполнения открывать сделки. Ведение уже
+    #: открытых от этой команды не зависит.
+    START_TRADING = "trade_on"
+    #: Запретить открытие новых сделок. Купленное продолжает вестись.
+    STOP_TRADING = "trade_off"
     #: Сводное состояние приложения.
     STATUS = "status"
     #: Состояние агрегаторов и их очередей.
@@ -82,6 +87,8 @@ _SIMPLE_COMMANDS = (
     CommandName.START_SCANNER,
     CommandName.STOP_SCANNER,
     CommandName.RESTART,
+    CommandName.START_TRADING,
+    CommandName.STOP_TRADING,
     CommandName.STATUS,
     CommandName.SCANS,
     CommandName.LEVEL2,
@@ -93,7 +100,13 @@ _SIMPLE_COMMANDS = (
 #: Действия, прерывающие работу сканера. Выполняются только после явного
 #: подтверждения (``docs/telegram_commands.md``).
 DESTRUCTIVE_COMMANDS = frozenset(
-    {CommandName.STOP_SCANNER, CommandName.RESTART, CommandName.SYSTEM_UPDATE}
+    {
+        CommandName.STOP_SCANNER,
+        CommandName.RESTART,
+        CommandName.SYSTEM_UPDATE,
+        # Разрешение тратить деньги подтверждается отдельно.
+        CommandName.START_TRADING,
+    }
 )
 
 

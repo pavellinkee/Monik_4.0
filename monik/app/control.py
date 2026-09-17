@@ -22,7 +22,8 @@ import asyncio
 from monik.domain.enums.control import ScannerRunState
 from monik.services.observability.logging import get_logger, log_fields
 
-__all__ = ["RESTART_EXIT_CODE", "ScannerSwitch"]
+__all__ = ["RESTART_EXIT_CODE", "ScannerSwitch"    "TradingSwitch",
+]
 
 _LOGGER = get_logger("app.control")
 
@@ -85,3 +86,61 @@ class ScannerSwitch:
             return
         self._restart_requested.set()
         _LOGGER.warning("restart requested by operator", extra=log_fields(state="restarting"))
+
+
+class TradingSwitch:
+    """Разрешение подсистемы исполнения тратить деньги.
+
+    Два уровня, и оба обязательны. Конфигурация говорит, **можно ли
+    вообще**: выключенная там торговля не включается ничем. Оператор
+    говорит, **начинать ли сейчас**.
+
+    После запуска процесса переключатель всегда выключен, даже если
+    конфигурация торговлю разрешает. Это сознательно: перезапуск —
+    момент, когда состояние счёта и рынка неизвестно, и возобновлять
+    траты без ведома человека нельзя. Ведение уже открытых сделок при
+    этом не останавливается — иначе перезапуск бросал бы купленные
+    токены.
+    """
+
+    __slots__ = ("_allowed", "_started")
+
+    def __init__(self, *, allowed: bool) -> None:
+        self._allowed = allowed
+        self._started = False
+
+    @property
+    def allowed(self) -> bool:
+        """Разрешена ли торговля конфигурацией."""
+        return self._allowed
+
+    @property
+    def is_open(self) -> bool:
+        """Можно ли открывать новые сделки прямо сейчас."""
+        return self._allowed and self._started
+
+    def start(self) -> bool:
+        """Разрешить открытие сделок. ``True``, если состояние изменилось."""
+        if not self._allowed or self._started:
+            return False
+        self._started = True
+        _LOGGER.warning("trading started by operator", extra=log_fields(state="trading"))
+        return True
+
+    def stop(self) -> bool:
+        """Запретить открытие новых сделок.
+
+        Уже открытые сделки продолжают вестись: остановка касается трат,
+        а не брошенных денег.
+        """
+        if not self._started:
+            return False
+        self._started = False
+        _LOGGER.warning("trading stopped by operator", extra=log_fields(state="paused"))
+        return True
+
+    def state(self) -> str:
+        """Состояние для оператора."""
+        if not self._allowed:
+            return "запрещена конфигурацией"
+        return "идёт" if self._started else "разрешена, но не запущена"

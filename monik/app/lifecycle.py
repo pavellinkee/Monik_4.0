@@ -63,6 +63,7 @@ __all__ = [
     "TASK_TOKEN_CHECK",
     "scan_task_name",
     "TASK_NOTIFICATIONS",
+    "TASK_POSITIONS",
     "TASK_BACKUP",
     "TASK_SYSTEM_HEALTH",
     "TASK_SYSTEM_UPDATES",
@@ -83,6 +84,7 @@ def scan_task_name(mode: ScanMode) -> str:
 
 
 TASK_NOTIFICATIONS = "notification_delivery"
+TASK_POSITIONS = "position_watch"
 TASK_TELEGRAM_COMMANDS = "telegram_commands"
 TASK_CAPABILITY_LOAD = "capability_load"
 TASK_TOKEN_CHECK = "token_check"
@@ -102,6 +104,7 @@ _DEFAULT_SCHEDULES: dict[str, TaskScheduleConfig] = {
     # период живёт в двух местах, и режим, не упомянутый в
     # scheduler.tasks, пошёл бы с чужим темпом.
     TASK_NOTIFICATIONS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=10),
+    TASK_POSITIONS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=10),
     TASK_TELEGRAM_COMMANDS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=5),
     TASK_CAPABILITY_LOAD: TaskScheduleConfig(mode=TaskMode.STARTUP),
     # Сверка адресов токенов: разовая, при старте. Опечатка в адресе
@@ -395,6 +398,20 @@ def build_application(
             priority=RequestPriority.LEVEL1_BUY,
             timeout=timedelta(seconds=config.scanner.level1.scan_timeout_seconds),
         )
+    if container.watcher is not None:
+        # Ведение открытых сделок не зависит от того, разрешено ли
+        # открывать новые: остановка торговли не должна бросать уже
+        # купленные токены.
+        registry.register(
+            TASK_POSITIONS,
+            _positions_task(container),
+            config=config.scheduler,
+            default=TaskScheduleConfig(
+                mode=TaskMode.INTERVAL,
+                interval_seconds=config.trading.recheck_interval_seconds,
+            ),
+            priority=RequestPriority.LEVEL2,
+        )
     registry.register(
         TASK_NOTIFICATIONS,
         _notification_task(container),
@@ -567,15 +584,41 @@ def _scan_task(container: Container, mode: ScanMode) -> TaskHandler:
                 extra=log_fields(mode=mode.value),
             )
             return
-        if not await container.level1.scan_all(mode):
+        results = await container.level1.scan_all(mode)
+        if not results:
             # Ни одна сеть не дала завершённого цикла: состояние подсистемы
             # не обновляется, причина уже записана в журнал.
             return
+        if mode is ScanMode.ANN and container.executor is not None:
+            # Находки торгового режима потребляет подсистема исполнения, а
+            # не Level 2. Решение принимает она: сканер только сообщает,
+            # что нашёл (``the_main_rules.md``, правило 11).
+            await container.executor.consider(results)
         container.health.set_component(
             "level1",
             ApplicationHealthStatus.HEALTHY,
             reason=f"последний цикл {container.clock.now().isoformat(timespec='seconds')}",
         )
+
+    return run
+
+
+def _positions_task(container: Container) -> TaskHandler:
+    """Ведение открытых сделок режима ``ann``.
+
+    Работает независимо от разрешения открывать новые сделки: купленный
+    токен нужно довести до продажи в любом случае.
+    """
+
+    async def run() -> None:
+        watcher = container.watcher
+        if watcher is None:
+            return
+        for notice in await watcher.tick():
+            notifier = container.system_notifier
+            if notifier is not None:
+                await notifier.notify_operator(notice.describe())
+            await watcher.mark_notified(notice.position)
 
     return run
 

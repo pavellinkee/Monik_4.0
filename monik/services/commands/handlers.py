@@ -45,6 +45,7 @@ from monik.services.commands.ports import (
     ScanReader,
     StatsSource,
     StatusSource,
+    TradingControl,
 )
 from monik.services.notifications.ports import MessageButton
 from monik.services.observability.logging import get_logger, log_fields
@@ -77,6 +78,8 @@ COMMAND_HELP: tuple[tuple[CommandName, str], ...] = (
     (CommandName.BACKUP, "состояние резервного копирования"),
     (CommandName.START_SCANNER, "разрешить сканирование"),
     (CommandName.STOP_SCANNER, "остановить сканирование (с подтверждением)"),
+    (CommandName.START_TRADING, "разрешить сделки режима ann (с подтверждением)"),
+    (CommandName.STOP_TRADING, "запретить новые сделки; открытые доводятся"),
     (CommandName.RESTART, "перезапустить приложение (с подтверждением)"),
     (
         CommandName.SYSTEM_UPDATE,
@@ -89,6 +92,8 @@ _BUTTON_LABELS: dict[CommandName, str] = {
     CommandName.START_SCANNER: "▶️ Запустить",
     CommandName.STOP_SCANNER: "⏸ Остановить",
     CommandName.RESTART: "🔄 Перезапустить",
+    CommandName.START_TRADING: "💰 Запустить торговлю",
+    CommandName.STOP_TRADING: "🚫 Остановить торговлю",
     CommandName.STATUS: "📊 Статус",
     CommandName.PROVIDERS: "🔌 Статус агрегатора",
     CommandName.STATS: "📈 Статистика",
@@ -115,6 +120,12 @@ _CONFIRMATION_PROMPTS: dict[CommandName, str] = {
     ),
     CommandName.RESTART: (
         "Перезапустить приложение?\nТекущий цикл будет корректно завершён, процесс перезапустится."
+    ),
+    CommandName.START_TRADING: (
+        "Разрешить режиму ann совершать сделки?\n"
+        "С этого момента найденная возможность приведёт к настоящей покупке "
+        "на средства торгового счёта. Уже открытые сделки ведутся всегда, "
+        "независимо от этого разрешения."
     ),
     CommandName.SYSTEM_UPDATE: (
         "Установить обновления системы и перезапустить Monik?\n"
@@ -146,6 +157,7 @@ class CommandRouter:
         providers: ProviderStatusSource | None = None,
         scans: ScanReader | None = None,
         control: ScannerControl | None = None,
+        trading: TradingControl | None = None,
         backups: BackupStatusSource | None = None,
         updater: SystemUpdater | None = None,
         application: str | None = None,
@@ -158,6 +170,7 @@ class CommandRouter:
         self._providers = providers
         self._scans = scans
         self._control = control
+        self._trading = trading
         self._backups = backups
         self._updater = updater
         self._application = application
@@ -214,6 +227,8 @@ class CommandRouter:
             return await self._backup_response()
         if command.name is CommandName.SYSTEM_UPDATE:
             return await self._system_update_response()
+        if command.name in {CommandName.START_TRADING, CommandName.STOP_TRADING}:
+            return self._trading_response(command.name)
         if command.name in {
             CommandName.START_SCANNER,
             CommandName.STOP_SCANNER,
@@ -274,6 +289,40 @@ class CommandRouter:
         return CommandResponse(
             text=f"✅ Обновления установлены.{packages} Приложение перезапускается.",
         )
+
+    def _trading_response(self, command: CommandName) -> CommandResponse:
+        """Разрешить или запретить открытие сделок.
+
+        Запрет касается только новых сделок: уже купленное доводится до
+        продажи в любом случае, иначе остановка бросала бы деньги.
+        """
+        switch = self._trading
+        if switch is None:
+            return CommandResponse(text="торговая подсистема не собрана", handled=False)
+        if not switch.allowed:
+            return CommandResponse(
+                text="Торговля запрещена конфигурацией (trading.execution_enabled).",
+                buttons=self._menu_buttons(),
+            )
+        if command is CommandName.START_TRADING:
+            changed = switch.start()
+            text = (
+                "💰 Торговля запущена. Следующая найденная возможность будет исполнена."
+                if changed
+                else "Торговля уже идёт"
+            )
+        else:
+            changed = switch.stop()
+            text = (
+                "🚫 Новые сделки не открываются. Открытые доводятся до продажи."
+                if changed
+                else "Торговля и так не запущена"
+            )
+        _LOGGER.warning(
+            "trading control command executed",
+            extra=log_fields(operation=command.value, state=switch.state()),
+        )
+        return CommandResponse(text=text, buttons=self._menu_buttons())
 
     def _control_response(self, command: CommandName) -> CommandResponse:
         """Выполнить подтверждённое управляющее действие."""

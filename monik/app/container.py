@@ -16,7 +16,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 from monik import version_label
-from monik.app.control import ScannerSwitch
+from monik.app.control import ScannerSwitch, TradingSwitch
 from monik.config.loader import LoadedConfiguration
 from monik.config.root import Configuration
 from monik.config.secrets import SecretValue
@@ -31,6 +31,7 @@ from monik.domain.models.job import ConfirmationResult
 from monik.domain.models.notification import NotificationDestination
 from monik.domain.models.opportunity import Opportunity
 from monik.domain.models.resource import ResourceKey
+from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.db import Database
 from monik.infrastructure.http import HttpClient, HttpxClient, UrlPolicy
 from monik.infrastructure.providers.contract import AggregatorAdapter
@@ -60,6 +61,7 @@ from monik.repositories.sqlite import (
     SqliteSchedulerRepository,
     SqliteStateTransitionRepository,
 )
+from monik.repositories.sqlite.positions import SqlitePositionRepository
 from monik.services.backup import BackupService
 from monik.services.calculator import ProfitCalculator
 from monik.services.commands import (
@@ -119,7 +121,13 @@ from monik.services.registries import (
     TokenRegistry,
 )
 from monik.services.resources import ResourceLimits, ResourceManager
-from monik.services.trading import ChainAccount, TradingWallet
+from monik.services.trading import (
+    ChainAccount,
+    PositionWatcher,
+    TradeExecutor,
+    TradingWallet,
+    TransactionSender,
+)
 from monik.services.updates import AptSystemUpdater, SystemUpdater
 
 __all__ = ["Container", "Repositories", "build_container"]
@@ -195,6 +203,10 @@ class Container:
     #: подсистема исполнения собрана быть не может.
     wallet: TradingWallet | None = None
     chain_account: ChainAccount | None = None
+    #: Разрешение тратить деньги: конфигурация плюс команда оператора.
+    trading: TradingSwitch | None = None
+    executor: TradeExecutor | None = None
+    watcher: PositionWatcher | None = None
 
     async def aclose(self) -> None:
         """Освободить внешние ресурсы."""
@@ -398,6 +410,55 @@ def build_container(
         if wallet is not None
         else None
     )
+    trading_switch = TradingSwitch(allowed=config.trading.execution_enabled)
+    executor: TradeExecutor | None = None
+    watcher: PositionWatcher | None = None
+    if wallet is not None and chain_account is not None:
+        positions_store = SqlitePositionRepository(database)
+        sender = TransactionSender(
+            wallet=wallet,
+            account=chain_account,
+            clock=clock,
+            chain_ids={
+                str(network.network_id): network.chain_id for network in config.enabled_networks
+            },
+        )
+        base_decimals = {
+            str(network.network_id): _base_decimals(config, network.network_id)
+            for network in config.enabled_networks
+        }
+        executor = TradeExecutor(
+            adapters={key.value: value for key, value in provider_adapters.items()},
+            positions=positions_store,
+            sequences=repositories.sequences,
+            account=chain_account,
+            sender=sender,
+            tokens=tokens,
+            clock=clock,
+            is_execution_open=lambda: trading_switch.is_open,
+            slippage_bps=int(config.trading.slippage_percent * 100),
+            receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
+            receipt_poll_seconds=config.trading.receipt_poll_seconds,
+        )
+        watcher = PositionWatcher(
+            adapters={key.value: value for key, value in provider_adapters.items()},
+            positions=positions_store,
+            account=chain_account,
+            sender=sender,
+            executor=executor,
+            clock=clock,
+            # Порог выхода задан в базовом токене. Сети могут отличаться
+            # знаками базового токена, поэтому берётся максимум: занижать
+            # порог нельзя, а сети сейчас совпадают.
+            min_exit_profit_raw=int(
+                config.trading.min_exit_profit * (10 ** max(base_decimals.values()))
+            ),
+            slippage_bps=int(config.trading.slippage_percent * 100),
+            long_wait_enabled=config.trading.max_wait_notice_enabled,
+            long_wait_seconds=config.trading.max_wait_notice_seconds,
+            receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
+            receipt_poll_seconds=config.trading.receipt_poll_seconds,
+        )
     commands = _build_commands(
         loaded,
         repositories=repositories,
@@ -408,6 +469,7 @@ def build_container(
         health=health,
         metrics=registry,
         control=control,
+        trading=trading_switch,
         backups=backups,
         updater=updater,
         providers=providers,
@@ -450,6 +512,9 @@ def build_container(
         token_check=token_check,
         wallet=wallet,
         chain_account=chain_account,
+        trading=trading_switch,
+        executor=executor,
+        watcher=watcher,
     )
 
 
@@ -884,6 +949,7 @@ def _build_commands(
     health: HealthMonitor,
     metrics: MetricsRegistry,
     control: ScannerSwitch,
+    trading: TradingSwitch,
     backups: BackupService,
     updater: SystemUpdater,
     providers: ProviderRegistry,
@@ -911,6 +977,7 @@ def _build_commands(
         ),
         scans=repositories.scans,
         control=control,
+        trading=trading,
         backups=_BackupStatusSource(backups),
         updater=updater,
         application=version_label(),
@@ -1092,3 +1159,12 @@ def _build_wallet(loaded: LoadedConfiguration) -> TradingWallet | None:
             code="trading_key_missing",
         )
     return TradingWallet(loaded.secrets.get(reference))
+
+
+def _base_decimals(config: Configuration, network_id: NetworkId) -> int:
+    """Знаки базового токена сети."""
+    network = config.network(network_id)
+    if network is None:
+        return 18
+    token = config.token(network_id, network.base_token_address)
+    return token.decimals if token is not None else 18

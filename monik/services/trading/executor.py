@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -65,7 +66,7 @@ class TradeExecutor:
         sender: TransactionSender,
         tokens: TokenRegistry,
         clock: Clock,
-        execution_enabled: bool,
+        is_execution_open: Callable[[], bool],
         slippage_bps: int,
         receipt_timeout_seconds: int = 120,
         receipt_poll_seconds: int = 2,
@@ -77,7 +78,7 @@ class TradeExecutor:
         self._sender = sender
         self._tokens = tokens
         self._clock = clock
-        self._execution_enabled = execution_enabled
+        self._is_execution_open = is_execution_open
         self._slippage_bps = slippage_bps
         self._receipt_timeout = timedelta(seconds=receipt_timeout_seconds)
         self._receipt_poll = timedelta(seconds=receipt_poll_seconds)
@@ -92,7 +93,7 @@ class TradeExecutor:
         choice = await self._choose(results)
         if choice is None:
             return None
-        if not self._execution_enabled:
+        if not self._is_execution_open():
             _LOGGER.info(
                 "trade withheld: execution is disabled",
                 extra=self._describe(choice),

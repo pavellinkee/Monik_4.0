@@ -32,6 +32,7 @@ __all__ = [
     "StatsSnapshot",
     "StatsSource",
     "StatusSource",
+    "TradingControl",
 ]
 
 
@@ -196,4 +197,31 @@ class ScannerControl(Protocol):
 
     def request_restart(self) -> None:
         """Запросить перезапуск процесса."""
+        ...
+
+
+@runtime_checkable
+class TradingControl(Protocol):
+    """Разрешение подсистемы исполнения открывать сделки.
+
+    Отдельный порт, а не часть :class:`ScannerControl`: остановка
+    сканирования и запрет тратить деньги — разные решения, и смешивать
+    их в одной команде нельзя.
+    """
+
+    @property
+    def allowed(self) -> bool:
+        """Разрешена ли торговля конфигурацией."""
+        ...
+
+    def start(self) -> bool:
+        """Разрешить открытие сделок."""
+        ...
+
+    def stop(self) -> bool:
+        """Запретить открытие новых сделок."""
+        ...
+
+    def state(self) -> str:
+        """Состояние для оператора."""
         ...
