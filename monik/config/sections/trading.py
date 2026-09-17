@@ -65,6 +65,12 @@ class TradingConfig(ConfigSection):
     #: контракт роутера окажется скомпрометирован.
     approve_unlimited: bool = True
 
+    #: Сколько ждать квитанции отправленной транзакции и как часто
+    #: спрашивать. Незавершённое ожидание не делает сделку неудачной:
+    #: транзакция может попасть в блок позже, и её подберёт наблюдатель.
+    receipt_timeout_seconds: int = Field(default=120, ge=1, le=3_600)
+    receipt_poll_seconds: int = Field(default=2, ge=1, le=60)
+
     #: Период отчёта о сделках в Telegram.
     report_interval_seconds: int = Field(default=1_800, ge=60, le=86_400)
 

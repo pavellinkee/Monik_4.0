@@ -13,10 +13,19 @@ from typing import Self
 
 from monik.domain.value_objects.strings import ValidatedStr
 
-__all__ = ["CorrelationId", "KId", "OpportunityId", "RequestId", "ScanId", "VId"]
+__all__ = [
+    "CorrelationId",
+    "KId",
+    "OpportunityId",
+    "RequestId",
+    "ScanId",
+    "TId",
+    "VId",
+]
 
 _V_ID_RE = re.compile(r"^#V\d{1,12}$")
 _K_ID_RE = re.compile(r"^#K\d{1,12}$")
+_T_ID_RE = re.compile(r"^#T[1-9][0-9]*$")
 _UUID_LIKE_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -40,6 +49,38 @@ class VId(ValidatedStr):
         if sequence <= 0:
             raise ValueError(f"sequence must be positive, got {sequence}")
         return cls(f"#V{sequence}")
+
+    @property
+    def sequence(self) -> int:
+        """Числовая часть идентификатора."""
+        return int(self[2:])
+
+
+class TId(ValidatedStr):
+    """Публичный идентификатор сделки режима ``ann``: ``#T1234``.
+
+    Своя последовательность: сделка — не возможность и не задание
+    проверки, и смешивать нумерацию нельзя, иначе по номеру в отчёте
+    нельзя будет понять, о чём речь.
+    """
+
+    __slots__ = ()
+
+    @classmethod
+    def normalize(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized.startswith("#"):
+            normalized = "#" + normalized
+        if not _T_ID_RE.fullmatch(normalized):
+            raise ValueError(f"invalid trade id: {value!r}; expected format '#T1234'")
+        return normalized
+
+    @classmethod
+    def from_sequence(cls, sequence: int) -> TId:
+        """Построить идентификатор из монотонной последовательности."""
+        if sequence <= 0:
+            raise ValueError(f"sequence must be positive, got {sequence}")
+        return cls(f"#T{sequence}")
 
     @property
     def sequence(self) -> int:

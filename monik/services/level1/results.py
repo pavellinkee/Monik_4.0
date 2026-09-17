@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from monik.domain.enums.lifecycle import ScanStatus
-from monik.domain.models.opportunity import Opportunity
+from monik.domain.models.opportunity import Candidate, Opportunity
 from monik.domain.models.scan import Scan
 from monik.services.level1.quotes import QuoteAttempt
 
@@ -23,6 +23,13 @@ class ScanResult:
     scan: Scan
     opportunities: tuple[Opportunity, ...] = ()
     failures: tuple[QuoteAttempt, ...] = ()
+    #: Кандидаты, прошедшие порог, в порядке привлекательности.
+    #:
+    #: Нужны режиму, у которого находки потребляет не Level 2, а
+    #: подсистема исполнения: она выбирает из них по своим правилам —
+    #: например по тому, какая сумма помещается в остаток счёта, — и
+    #: получать это знание из созданных Opportunity ей незачем.
+    qualified: tuple[Candidate, ...] = ()
 
     @property
     def status(self) -> ScanStatus:

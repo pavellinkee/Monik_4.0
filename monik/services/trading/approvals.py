@@ -65,9 +65,7 @@ class ApprovalRequest:
     def calldata(self) -> str:
         """Закодированный вызов нужного вида."""
         if self.requirement.kind is AllowanceKind.PERMIT2:
-            return encode_permit2_approve(
-                str(self.token.address), self.requirement.spender
-            )
+            return encode_permit2_approve(str(self.token.address), self.requirement.spender)
         return encode_approve(self.requirement.spender, UNLIMITED)
 
     def describe(self) -> str:

@@ -209,7 +209,7 @@ class Level1Scanner:
             timed_out = True
             _LOGGER.warning("level 1 scan timed out")
 
-        opportunities, duplicates = await self._create_opportunities(scan, candidates)
+        opportunities, duplicates, qualified = await self._create_opportunities(scan, candidates)
         status = self._final_status(collector, timed_out=timed_out)
         finished = await self._finish(
             scan,
@@ -222,6 +222,7 @@ class Level1Scanner:
         return ScanResult(
             scan=finished,
             opportunities=opportunities,
+            qualified=qualified,
             failures=tuple(
                 attempt for attempt in collector.statistics.attempts if not attempt.is_usable
             ),
@@ -288,8 +289,13 @@ class Level1Scanner:
 
     async def _create_opportunities(
         self, scan: Scan, candidates: tuple[Candidate, ...]
-    ) -> tuple[tuple[Opportunity, ...], int]:
-        """Создать Opportunity из кандидатов, прошедших порог."""
+    ) -> tuple[tuple[Opportunity, ...], int, tuple[Candidate, ...]]:
+        """Создать Opportunity из кандидатов, прошедших порог.
+
+        Третьим значением возвращаются сами прошедшие кандидаты в порядке
+        привлекательности: у режима, чьи находки потребляет не Level 2,
+        решение принимается по ним.
+        """
         config = self._configuration.scanner.level1
         qualified = tuple(
             candidate for candidate in candidates if _passes_preliminary_threshold(candidate)
@@ -297,9 +303,10 @@ class Level1Scanner:
         # Торговый режим выбирает по заработку в базовом токене, остальные —
         # по доходности в процентах.
         groups = rank_groups(group_candidates(qualified), by_profit=scan.scope.mode is ScanMode.ANN)
+        ranked = tuple(candidate for group in groups for candidate in group.candidates)
         if scan.scope.mode not in self._dispatch_modes:
             _log_observed(scan.scope.mode, groups)
-            return (), 0
+            return (), 0, ranked
         guard = DeduplicationGuard(
             self._opportunities,
             window=timedelta(seconds=config.deduplication_window_seconds),
@@ -321,7 +328,7 @@ class Level1Scanner:
             opportunity = await self._create_one(group, scan, guard, handoff)
             if opportunity is not None:
                 created.append(opportunity)
-        return tuple(created), guard.duplicates
+        return tuple(created), guard.duplicates, ranked
 
     async def _create_one(
         self,

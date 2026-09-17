@@ -16,15 +16,26 @@ from monik.services.trading.chain import (
     TokenBalance,
     TransactionReceipt,
 )
+from monik.services.trading.executor import TradeExecutor
+from monik.services.trading.ports import PositionStore, SequenceSource
+from monik.services.trading.sender import SentTransaction, TransactionSender
 from monik.services.trading.wallet import TradingWallet
+from monik.services.trading.watcher import LongWaitNotice, PositionWatcher
 
 __all__ = [
     "ApprovalRequest",
     "ChainAccount",
+    "LongWaitNotice",
+    "PositionStore",
+    "PositionWatcher",
+    "SentTransaction",
+    "SequenceSource",
     "SimulationResult",
     "TokenBalance",
+    "TradeExecutor",
     "TradingWallet",
     "TransactionReceipt",
+    "TransactionSender",
     "encode_approve",
     "encode_permit2_approve",
 ]

@@ -453,6 +453,8 @@ trading:
   # Минимальная чистая прибыль для закрытия позиции, в базовом токене.
   min_exit_profit: "0.01"
   recheck_interval_seconds: 10
+  receipt_timeout_seconds: 120
+  receipt_poll_seconds: 2
   # Предельный срок ожидания выхода. По его истечении приходит
   # уведомление; позицию в убыток система не закрывает никогда.
   max_wait_notice_enabled: true

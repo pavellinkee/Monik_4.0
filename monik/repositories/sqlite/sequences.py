@@ -17,6 +17,8 @@ __all__ = [
 OPPORTUNITY_SEQUENCE = "opportunity"
 JOB_SEQUENCE = "level2_job"
 NOTIFICATION_SEQUENCE = "notification"
+#: Последовательность сделок режима ann.
+POSITION_SEQUENCE = "position"
 
 
 class SqliteIdSequenceRepository:

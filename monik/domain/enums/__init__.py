@@ -44,6 +44,7 @@ from monik.domain.enums.resources import (
     ResourceState,
 )
 from monik.domain.enums.scheduler import OverlapPolicy, TaskMode
+from monik.domain.enums.trading import PositionStatus
 
 __all__ = [
     "AdapterState",
@@ -83,4 +84,5 @@ __all__ = [
     "TaskMode",
     "ThresholdMetric",
     "ScanMode",
+    "PositionStatus",
 ]

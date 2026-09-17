@@ -181,3 +181,47 @@ class TestSimulation:
         methods = [call.request.json_body["method"] for call in http.calls]
         assert methods == ["eth_call"]
         assert "eth_sendRawTransaction" not in methods
+
+
+class TestWaiting:
+    """Ожидание квитанции обязано завершаться всегда."""
+
+    async def test_wait_returns_none_after_a_bounded_number_of_attempts(self) -> None:
+        """Цикл, выходящий по часам, зависит от того, что часы идут."""
+        from datetime import timedelta
+
+        from eth_account import Account
+
+        from monik.config.secrets import SecretValue
+        from monik.services.trading import TradingWallet, TransactionSender
+
+        clock = FakeClock(f.NOW)  # часы стоят
+        wallet = TradingWallet(SecretValue("K", str(Account.create().key.hex())))
+
+        def node(request: object) -> HttpResponse:
+            body = getattr(request, "json_body", {}) or {}
+            method = body.get("method")
+            if method == "eth_gasPrice":
+                return _result(hex(30_000_000_000))
+            if method == "eth_getTransactionCount":
+                return _result("0x1")
+            if method == "eth_sendRawTransaction":
+                return _result("0x" + "ab" * 32)
+            return _result(None)
+
+        http = FakeHttpClient(handler=node)
+        account = ChainAccount(
+            address=wallet.address,
+            http=http,
+            resources=resource_manager(clock),
+            clock=clock,
+            rpc_urls={str(f.POLYGON): "https://rpc.example"},
+        )
+        sender = TransactionSender(
+            wallet=wallet, account=account, clock=clock, chain_ids={str(f.POLYGON): 137}
+        )
+        sent = await sender.send(f.POLYGON, to="0x" + "11" * 20, data="0x", gas_limit=21_000)
+
+        receipt = await sender.wait(sent, timeout=timedelta(seconds=6), poll=timedelta(seconds=3))
+
+        assert receipt is None, "остановились, хотя часы не шли"

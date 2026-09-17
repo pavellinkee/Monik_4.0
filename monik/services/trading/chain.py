@@ -243,9 +243,7 @@ class ChainAccount:
             dedup="",
         )
         if not isinstance(raw, str):
-            raise DataError(
-                "rpc returned no transaction hash", code="rpc_value_missing"
-            )
+            raise DataError("rpc returned no transaction hash", code="rpc_value_missing")
         return raw
 
     async def receipt(self, network_id: NetworkId, tx_hash: str) -> TransactionReceipt | None:

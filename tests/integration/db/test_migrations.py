@@ -21,6 +21,7 @@ EXPECTED_TABLES = {
     "notifications",
     "opportunities",
     "opportunity_amounts",
+    "positions",
     "scans",
     "scheduler_executions",
     "scheduler_tasks",
@@ -142,3 +143,22 @@ class TestMigrationSafety:
     def test_shipped_migrations_have_unique_increasing_versions(self) -> None:
         versions = [migration.version for migration in ALL_MIGRATIONS]
         assert versions == sorted(set(versions))
+
+
+class TestPositions:
+    """Миграция 0004 заводит хранение сделок режима ann."""
+
+    async def test_position_columns_exist(self, database: Database) -> None:
+        await MigrationRunner(database).upgrade()
+        columns = await _columns(database, "positions")
+        assert {"t_id", "status", "raw_input", "raw_acquired", "raw_returned"} <= columns
+        assert {"buy_tx_hash", "sell_tx_hash", "long_wait_notified_at"} <= columns
+
+    async def test_buy_hash_is_unique(self, database: Database) -> None:
+        """Одна отправленная транзакция не может относиться к двум сделкам.
+
+        Повторная запись означала бы двойной учёт денег.
+        """
+        await MigrationRunner(database).upgrade()
+        indexes = await database.fetch_all("PRAGMA index_list(positions)")
+        assert any(row["unique"] for row in indexes)

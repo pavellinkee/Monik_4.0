@@ -52,9 +52,7 @@ def _erc20() -> AllowanceRequirement:
 
 
 def _permit2() -> AllowanceRequirement:
-    return AllowanceRequirement(
-        kind=AllowanceKind.PERMIT2, contract=SPENDER, spender=ROUTER
-    )
+    return AllowanceRequirement(kind=AllowanceKind.PERMIT2, contract=SPENDER, spender=ROUTER)
 
 
 class TestPermit2Encoding:
