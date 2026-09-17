@@ -21,6 +21,7 @@ from monik.domain.models.opportunity import Candidate
 from monik.domain.models.scan import Scan, ScanScope
 from monik.domain.value_objects.identifiers import ScanId
 from monik.infrastructure.providers.fake import FakeAdapter
+from monik.services.calculator import ProfitCalculator
 from monik.services.level1.results import ScanResult
 from monik.services.observability import FakeClock
 from monik.services.registries import TokenRegistry
@@ -29,6 +30,8 @@ from tests import factories as f
 from tests.component.level1.conftest import level1_document
 from tests.unit.config.conftest import VALID_ENV
 from tests.unit.trading.support import (
+    FixedCosts,
+    MemoryCalibration,
     MemoryPositions,
     MemorySequences,
     ScriptedNode,
@@ -99,6 +102,9 @@ def _executor(
     positions: MemoryPositions,
     *,
     execution_enabled: bool = True,
+    costs: FixedCosts | None = None,
+    min_entry_profit_raw: int = 0,
+    calibration: MemoryCalibration | None = None,
 ) -> TradeExecutor:
     clock = FakeClock(f.NOW)
     wallet = _wallet()
@@ -109,9 +115,16 @@ def _executor(
         account=build_account(node, clock, wallet.address),
         sender=build_sender(node, clock, wallet),
         tokens=_tokens(),
+        calculator=ProfitCalculator(clock),
+        # По умолчанию уточняющая проверка стоимости ничего не отсекает:
+        # проверки выбора и отправки к ней отношения не имеют, а там, где
+        # решает именно она, стоимость задаётся явно.
+        costs=costs or FixedCosts(0),
+        calibration=calibration,
         clock=clock,
         is_execution_open=lambda: execution_enabled,
         slippage_bps=10,
+        min_entry_profit_raw=min_entry_profit_raw,
         receipt_timeout_seconds=1,
         receipt_poll_seconds=1,
     )
@@ -227,3 +240,100 @@ class TestRecording:
 
         assert position is not None
         assert position.status is PositionStatus.BUYING
+
+
+class TestExactCost:
+    """Перед сделкой стоимость круга уточняется по собранным транзакциям.
+
+    Поиск оценивает газ по числу из котировки: оно приходит бесплатно, но
+    считает голый обмен по одному лучшему пути. Здесь, у единственного
+    кандидата, уже собрана настоящая транзакция покупки, и собрать вторую
+    ногу стоит один запрос. За проход таких проверок ноль или одна, тогда
+    как комбинаций двенадцать.
+    """
+
+    def _node(self) -> ScriptedNode:
+        return ScriptedNode(balances={USDT_ADDRESS: 60_000_000})
+
+    async def test_trade_is_skipped_when_the_exact_cost_eats_the_profit(self) -> None:
+        """Ожидали 0.1 USDT, круг стоит 0.15 — сделки не будет."""
+        positions = MemoryPositions()
+        node = self._node()
+        executor = _executor(node, positions, costs=FixedCosts(150_000), min_entry_profit_raw=5_000)
+
+        position = await executor.consider((_result(_candidate(50_000_000, "0.1")),))
+
+        assert position is None
+        assert not node.sent, "в сеть не ушло ничего"
+        assert positions.items == {}
+
+    async def test_trade_proceeds_when_the_exact_cost_leaves_enough(self) -> None:
+        """Парная проверка: решает именно стоимость, а не сам кандидат."""
+        positions = MemoryPositions()
+        node = self._node()
+        executor = _executor(node, positions, costs=FixedCosts(50_000), min_entry_profit_raw=5_000)
+
+        position = await executor.consider((_result(_candidate(50_000_000, "0.1")),))
+
+        assert position is not None
+        assert node.sent
+
+    async def test_unknown_exact_cost_does_not_cancel_the_trade(self) -> None:
+        """Уточнение не обязано удаваться.
+
+        Поиск уже учёл газ с поправкой, и отказывать из-за недоступной
+        уточняющей проверки значило бы терять возможности на ровном месте.
+        """
+        positions = MemoryPositions()
+        node = self._node()
+        executor = _executor(node, positions, costs=FixedCosts(None), min_entry_profit_raw=5_000)
+
+        position = await executor.consider((_result(_candidate(50_000_000, "0.1")),))
+
+        assert position is not None
+
+
+class TestCalibrationRecording:
+    """Фактический расход газа известен только здесь.
+
+    Поиск его не узнаёт никогда: котировка обещает, а платит исполнение.
+    Замер передаётся отсюда и не стоит ни одного лишнего обращения —
+    обещанное пришло с котировкой, фактическое с квитанцией.
+    """
+
+    async def test_actual_gas_is_reported_against_the_quoted_estimate(self) -> None:
+        positions = MemoryPositions()
+        calibration = MemoryCalibration()
+        node = ScriptedNode(
+            balances={USDT_ADDRESS: 60_000_000},
+            after_send={str(f.AAVE.address).lower(): 5 * 10**18},
+        )
+        executor = _executor(node, positions, calibration=calibration)
+        candidate = _candidate(50_000_000, "0.1")
+        candidate = candidate.model_copy(
+            update={
+                "buy_quote": candidate.buy_quote.model_copy(update={"estimated_gas_units": 100_000})
+            }
+        )
+
+        position = await executor.consider((_result(candidate),))
+
+        assert position is not None
+        assert position.buy_quoted_gas_units == 100_000
+        # Узел стенда сообщает расход 180 000 — втрое больше обещанного.
+        assert position.buy_gas_units == 180_000
+        assert calibration.records == [(str(f.POLYGON), "uniswap", 100_000, 180_000)]
+
+    async def test_nothing_is_reported_without_a_quoted_estimate(self) -> None:
+        """Отношение не к чему считать, и выдумывать его нельзя."""
+        positions = MemoryPositions()
+        calibration = MemoryCalibration()
+        node = ScriptedNode(
+            balances={USDT_ADDRESS: 60_000_000},
+            after_send={str(f.AAVE.address).lower(): 5 * 10**18},
+        )
+        executor = _executor(node, positions, calibration=calibration)
+
+        await executor.consider((_result(_candidate(50_000_000, "0.1")),))
+
+        assert calibration.records == []

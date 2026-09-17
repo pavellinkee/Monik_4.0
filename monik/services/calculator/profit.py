@@ -118,6 +118,23 @@ class ProfitCalculator:
 
     # --- внутреннее -------------------------------------------------------
 
+    def net_profit_with_gas(self, result: ProfitResult, *, gas_cost: Decimal) -> Decimal | None:
+        """Тот же результат, но с другой стоимостью газа.
+
+        Нужен подсистеме исполнения. Поиск считает газ по оценке из
+        котировки — она бесплатна, но приблизительна. Перед самой сделкой
+        стоимость становится известна точно, и вопрос «сколько останется
+        при этой стоимости» — тот же расчёт прибыли, только с заменённым
+        слагаемым. Формула поэтому живёт здесь, а не у исполнителя
+        (``09_PROFIT_CALCULATOR.md`` §2, ``CLAUDE.md`` §25).
+
+        ``None``, если исходный расчёт неполон: заменять слагаемое в
+        неизвестной сумме нечего.
+        """
+        if result.net_profit is None or result.costs is None:
+            return None
+        return result.net_profit + result.costs.gas_cost - gas_cost
+
     def _invalid_reason(self, data: ProfitCalculationInput) -> str | None:
         """Причина, по которой данные противоречивы (``09_PROFIT_CALCULATOR.md`` §20).
 

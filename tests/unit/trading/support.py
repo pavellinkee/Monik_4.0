@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from monik.domain.enums.providers import ProviderId
 from monik.domain.models.position import Position
 from monik.domain.models.token import Token
 from monik.domain.value_objects.identity import NetworkId
@@ -70,6 +71,26 @@ class FixedCosts:
     ) -> int | None:
         self.calls.append(wei)
         return self.raw
+
+
+class MemoryCalibration:
+    """Приёмник замеров расхода газа, копящий их в памяти.
+
+    **Test implementation** (``CLAUDE.md`` §10).
+    """
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, int, int]] = []
+
+    async def record(
+        self,
+        network_id: NetworkId,
+        provider_id: ProviderId,
+        *,
+        quoted_units: int,
+        actual_units: int,
+    ) -> None:
+        self.records.append((str(network_id), provider_id.value, quoted_units, actual_units))
 
 
 class MemorySequences:

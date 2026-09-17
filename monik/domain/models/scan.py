@@ -14,6 +14,7 @@ from monik.domain.models.token import TokenKey
 from monik.domain.value_objects.amounts import Percentage
 from monik.domain.value_objects.identifiers import ScanId
 from monik.domain.value_objects.identity import NetworkId
+from monik.domain.value_objects.numeric import NonNegativeDecimal
 from monik.domain.value_objects.timestamps import UtcDatetime
 
 __all__ = ["BestCombination", "Scan", "ScanScope", "ScanStatistics"]
@@ -60,6 +61,18 @@ class BestCombination(DomainModel):
     token: TokenKey
     buy_provider: ProviderId
     sell_provider: ProviderId
+
+    #: Разбивка газа: во что он обошёлся в валюте расчёта, сколько единиц
+    #: обещали котировки и по какой цене.
+    #:
+    #: Без разбивки по итоговой стоимости не видно, в чём ошибка — в
+    #: расходе или в цене, и первое же расхождение с фактом пришлось бы
+    #: разбирать по цепи вручную. Хранятся **обещанные** единицы, без
+    #: поправки: поправка известна отдельно, а обещанное — исходные данные,
+    #: которые больше взять неоткуда.
+    gas_cost: NonNegativeDecimal | None = None
+    quoted_gas_units: int | None = Field(default=None, ge=0)
+    gas_price_wei: int | None = Field(default=None, ge=0)
 
 
 class ScanStatistics(DomainModel):

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Self
 
 from pydantic import Field, model_validator
 
 from monik.config.base import ConfigSection
 from monik.domain.enums.base import DomainEnum
+from monik.domain.value_objects.numeric import PositiveDecimal
 
 __all__ = ["FeeConfig", "GasConfig", "GasSource", "PriceConfig", "PriceSource"]
 
@@ -61,6 +63,31 @@ class FeeConfig(ConfigSection):
         return self
 
 
+class GasCalibrationConfig(ConfigSection):
+    """Уточнение оценки газа по фактическому расходу.
+
+    Фактический расход приходит в квитанции, которую подсистема исполнения
+    и так запрашивает, а обещанный котировкой — в самой котировке. Их
+    отношение и есть поправка. Она не стоит ни одного дополнительного
+    обращения и сама следует за изменением маршрутов.
+    """
+
+    enabled: bool = True
+    #: Сколько замеров нужно, чтобы поправке верить. До этого действует
+    #: заданная конфигурацией: одна сделка — не статистика.
+    min_samples: int = Field(default=5, ge=1, le=1_000)
+    #: Предел накопленной истории. По его достижении накопленное
+    #: уполовинивается: поправка обязана следовать за изменением маршрутов,
+    #: а не усреднять их за всё время работы.
+    max_samples: int = Field(default=100, ge=2, le=100_000)
+
+    @model_validator(mode="after")
+    def _validate(self) -> Self:
+        if self.max_samples <= self.min_samples:
+            raise ValueError("max_samples must exceed min_samples")
+        return self
+
+
 class GasConfig(ConfigSection):
     """Параметры получения gas (``17_CONFIGURATION.md`` §40, решение D-4)."""
 
@@ -81,6 +108,25 @@ class GasConfig(ConfigSection):
     #: источнике ``STATIC``: это явно настроенный fallback, а не
     #: production-источник данных.
     static_wei_per_gas: dict[str, int] = Field(default_factory=dict)
+
+    #: Поправка к оценке расхода газа, приходящей в котировке.
+    #:
+    #: Агрегатор оценивает голый обмен по одному лучшему пути, а платим мы
+    #: за реальный вызов роутера — с разрешениями, обёртками и маршрутом,
+    #: который на исполнении может разойтись на несколько пулов. Разница
+    #: измерена и оказалась кратной, а не процентной, поэтому поправка
+    #: множителем, а не слагаемым.
+    #:
+    #: Это запасное значение: как только по агрегатору накопятся замеры,
+    #: поправка считается по ним (:attr:`calibration`).
+    quote_estimate_multiplier: PositiveDecimal = Decimal("1.0")
+    #: Поправка отдельных агрегаторов, по их идентификаторам. Оценки у них
+    #: расходятся с фактом по-разному, и общий множитель одному занижал бы,
+    #: другому завышал.
+    quote_estimate_multipliers: dict[str, PositiveDecimal] = Field(default_factory=dict)
+
+    #: Самокалибровка поправки по фактическому расходу.
+    calibration: GasCalibrationConfig = GasCalibrationConfig()
 
     @model_validator(mode="after")
     def _validate(self) -> Self:

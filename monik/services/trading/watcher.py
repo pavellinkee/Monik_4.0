@@ -31,6 +31,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from monik.domain.enums.operations import OperationType
+from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
 from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.position import Position
@@ -40,7 +41,7 @@ from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.trading.chain import ChainAccount
 from monik.services.trading.executor import TradeExecutor
-from monik.services.trading.ports import ExecutionCosts, PositionStore
+from monik.services.trading.ports import ExecutionCosts, GasCalibrationRecorder, PositionStore
 from monik.services.trading.sender import SentTransaction, TransactionSender
 
 __all__ = ["LongWaitNotice", "PositionWatcher"]
@@ -79,6 +80,7 @@ class PositionWatcher:
         sender: TransactionSender,
         executor: TradeExecutor,
         costs: ExecutionCosts,
+        calibration: GasCalibrationRecorder | None,
         clock: Clock,
         min_exit_profit_raw: int,
         min_exit_profit_waiting_raw: int,
@@ -94,6 +96,7 @@ class PositionWatcher:
         self._sender = sender
         self._executor = executor
         self._costs = costs
+        self._calibration = calibration
         self._clock = clock
         self._min_exit_profit_raw = min_exit_profit_raw
         self._min_exit_profit_waiting_raw = min_exit_profit_waiting_raw
@@ -173,6 +176,8 @@ class PositionWatcher:
         # к сделке: считать его нулём значило бы объявить неудачу
         # бесплатной.
         spent_on_selling = _total_wei(position.sell_gas_wei, receipt.gas_cost_wei)
+        sold_units = _total_wei(position.sell_gas_units, receipt.gas_used)
+        await self._record_calibration(position, receipt.gas_used)
         if not receipt.succeeded:
             # Продажа откатилась — токен остался у нас. Возвращаемся к
             # ожиданию: это не потеря, а неудачная попытка выхода.
@@ -182,6 +187,7 @@ class PositionWatcher:
                         "status": PositionStatus.HOLDING,
                         "sell_tx_hash": None,
                         "sell_gas_wei": spent_on_selling,
+                        "sell_gas_units": sold_units,
                         "updated_at": now,
                     }
                 )
@@ -205,6 +211,7 @@ class PositionWatcher:
                         "raw_returned": position.raw_input,
                         "raw_gas_cost": None,
                         "sell_gas_wei": spent_on_selling,
+                        "sell_gas_units": sold_units,
                         "updated_at": now,
                         "closed_at": now,
                     }
@@ -223,6 +230,7 @@ class PositionWatcher:
                 "status": PositionStatus.CLOSED,
                 "raw_returned": max(returned, 0),
                 "sell_gas_wei": spent_on_selling,
+                "sell_gas_units": sold_units,
                 "raw_gas_cost": gas_cost,
                 "updated_at": now,
                 "closed_at": now,
@@ -271,6 +279,10 @@ class PositionWatcher:
             input_amount=position.target_token.amount_from_base_units(position.raw_acquired),
             request_id=RequestId.generate(),
             slippage_bps=self._slippage_bps,
+            # Открытая сделка ждать не может: пока котировка выхода стоит
+            # в очереди за поиском, купленный токен остаётся на руках
+            # (``the_main_rules.md``, правило 13).
+            priority=RequestPriority.EXECUTION,
         )
         quote = await adapter.get_quote(request)
         gross = position.profit_if_sold_for(quote.output_amount.raw)
@@ -286,7 +298,10 @@ class PositionWatcher:
         profit = position.profit_if_sold_for(quote.output_amount.raw, raw_costs=costs)
         if profit < needed:
             return self._wait(position, profit=profit, needed=needed, costs=costs)
-        await self._sell(position, transaction)
+        await self._sell(
+            position.model_copy(update={"sell_quoted_gas_units": quote.estimated_gas_units}),
+            transaction,
+        )
         return None
 
     async def _exit_costs_raw(self, position: Position, transaction: SwapTransaction) -> int | None:
@@ -309,6 +324,22 @@ class PositionWatcher:
             return None
         return await self._costs.to_base_raw(
             position.network_id, position.base_token, wei=total_wei
+        )
+
+    async def _record_calibration(self, position: Position, actual_units: int) -> None:
+        """Передать замер расхода газа продажи.
+
+        Нога продажи расходится с оценкой сильнее покупки: её маршрут чаще
+        разбивается на несколько пулов. Именно поэтому замер по ней важнее
+        всего, и он же достаётся бесплатно — из уже полученной квитанции.
+        """
+        if self._calibration is None or position.sell_quoted_gas_units is None:
+            return
+        await self._calibration.record(
+            position.network_id,
+            position.sell_provider_id,
+            quoted_units=position.sell_quoted_gas_units,
+            actual_units=actual_units,
         )
 
     async def _round_trip_cost_raw(

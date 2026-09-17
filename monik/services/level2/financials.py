@@ -22,6 +22,7 @@ from monik.domain.models.profit import ProfitCalculationInput, ProfitResult
 from monik.domain.models.quote import Quote
 from monik.services.calculator.profit import ProfitCalculator
 from monik.services.fees.context import FeeContext
+from monik.services.gas.round_trip import GasUnitsCorrection, round_trip_gas_units
 from monik.services.level2.ports import FeeSnapshotSource, GasSource, RateSource
 from monik.services.prices.quoted import gas_rate_from_quotes
 from monik.services.registries.networks import NetworkRegistry
@@ -52,6 +53,7 @@ class Level2Financials:
         tokens: TokenRegistry,
         networks: NetworkRegistry,
         profitability: ProfitabilityConfig,
+        gas_correction: GasUnitsCorrection | None = None,
     ) -> None:
         self._calculator = calculator
         self._fees = fees
@@ -60,6 +62,10 @@ class Level2Financials:
         self._tokens = tokens
         self._networks = networks
         self._profitability = profitability
+        # Поправка к оценке расхода газа. ``None`` — считать по
+        # котировке как есть: так ведут себя тесты, которым
+        # поправка не нужна.
+        self._gas_correction = gas_correction
 
     async def evaluate(
         self, buy_quote: Quote, sell_quote: Quote, mode: ScanMode
@@ -77,7 +83,7 @@ class Level2Financials:
         fees: tuple[Fee, ...] = tuple(fee for snapshot in snapshots for fee in snapshot.fees)
         gas = await self._gas.estimate(
             buy_quote.network_id,
-            gas_units=_total_gas_units(buy_quote, sell_quote),
+            gas_units=round_trip_gas_units(buy_quote, sell_quote, correction=self._gas_correction),
             quoted_price_wei=_quoted_gas_price(buy_quote, sell_quote),
             source="level2_verification",
         )
@@ -148,10 +154,3 @@ def _quoted_gas_price(buy_quote: Quote, sell_quote: Quote) -> int | None:
         if quote.estimated_gas_price_wei is not None:
             return quote.estimated_gas_price_wei
     return None
-
-
-def _total_gas_units(buy_quote: Quote, sell_quote: Quote) -> int | None:
-    """Суммарная оценка газа round-trip; неполные данные дают ``None``."""
-    if buy_quote.estimated_gas_units is None or sell_quote.estimated_gas_units is None:
-        return None
-    return buy_quote.estimated_gas_units + sell_quote.estimated_gas_units

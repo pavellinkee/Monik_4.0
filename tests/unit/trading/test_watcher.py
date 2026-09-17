@@ -15,15 +15,18 @@ from eth_account import Account
 
 from monik.config.secrets import SecretValue
 from monik.domain.enums.providers import ProviderId
+from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
 from monik.domain.models.position import Position
 from monik.domain.value_objects.identifiers import TId
 from monik.infrastructure.providers.fake import FakeAdapter
+from monik.services.calculator import ProfitCalculator
 from monik.services.observability import FakeClock
 from monik.services.trading import PositionWatcher, TradeExecutor, TradingWallet
 from tests import factories as f
 from tests.unit.trading.support import (
     FixedCosts,
+    MemoryCalibration,
     MemoryPositions,
     MemorySequences,
     ScriptedNode,
@@ -51,7 +54,9 @@ def _position(**overrides: object) -> Position:
         # приходит квитанцией вместе с ценой. Без этого знания круг
         # посчитать не из чего, и выход откладывается.
         "buy_gas_wei": 180_000 * 30_000_000_000,
+        "buy_gas_units": 180_000,
         "sell_gas_wei": 0,
+        "sell_gas_units": 0,
         "opened_at": f.NOW,
     }
     base.update(overrides)
@@ -72,11 +77,13 @@ def _watcher(
     min_exit_profit_raw: int = 10_000,
     min_exit_profit_waiting_raw: int | None = None,
     costs: FixedCosts | None = None,
+    calibration: MemoryCalibration | None = None,
     sell_rate: str = "10.00",
     long_wait_enabled: bool = True,
     long_wait_seconds: int = 7_200,
 ) -> PositionWatcher:
     active = clock or FakeClock(f.NOW)
+    exit_costs = costs or FixedCosts(COSTS_RAW)
     wallet = TradingWallet(SecretValue("K", str(Account.create().key.hex())))
     adapter = FakeAdapter(ProviderId.UNISWAP, active, rate=_rate(sell_rate))
     account = build_account(node, active, wallet.address)
@@ -88,9 +95,13 @@ def _watcher(
         account=account,
         sender=sender,
         tokens=_tokens(),
+        calculator=ProfitCalculator(active),
+        costs=exit_costs,
+        calibration=calibration,
         clock=active,
         is_execution_open=lambda: True,
         slippage_bps=10,
+        min_entry_profit_raw=0,
         receipt_timeout_seconds=1,
         receipt_poll_seconds=1,
     )
@@ -100,7 +111,8 @@ def _watcher(
         account=account,
         sender=sender,
         executor=executor,
-        costs=costs or FixedCosts(COSTS_RAW),
+        costs=exit_costs,
+        calibration=calibration,
         clock=active,
         min_exit_profit_raw=min_exit_profit_raw,
         min_exit_profit_waiting_raw=(
@@ -510,3 +522,49 @@ class TestProceeds:
         # Чистый итог меньше валового ровно на стоимость круга.
         assert position.raw_gas_cost == COSTS_RAW
         assert position.net_result_raw == 500_000 - COSTS_RAW
+
+
+class TestPriority:
+    """Запросы сделки обслуживаются раньше поисковых.
+
+    ``the_main_rules.md``, правило 13. Поиск, уступивший очередь, теряет
+    один цикл; открытая сделка — купленный токен, потому что отклонение,
+    ради которого он куплен, живёт минуты.
+    """
+
+    async def test_exit_quote_is_asked_with_execution_priority(self) -> None:
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate="10.1")
+        adapter = watcher._adapters[ProviderId.UNISWAP.value]  # noqa: SLF001
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert adapter.quote_calls, "котировка выхода запрошена"
+        assert all(request.priority is RequestPriority.EXECUTION for request in adapter.quote_calls)
+
+
+class TestSellCalibration:
+    """Нога продажи расходится с оценкой сильнее покупки.
+
+    Её маршрут чаще разбивается на несколько пулов, поэтому замер по ней
+    важнее всего — и он же достаётся бесплатно, из уже полученной
+    квитанции.
+    """
+
+    async def test_actual_sell_gas_is_reported(self) -> None:
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        calibration = MemoryCalibration()
+        watcher = _watcher(node, positions, sell_rate="10.1", calibration=calibration)
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        position = positions.items["#T1"]
+        assert position.status is PositionStatus.CLOSED
+        assert position.sell_gas_units == 180_000
+        assert calibration.records == [
+            (str(f.POLYGON), "uniswap", position.sell_quoted_gas_units, 180_000)
+        ]

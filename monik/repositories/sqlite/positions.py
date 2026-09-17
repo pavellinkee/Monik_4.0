@@ -33,6 +33,7 @@ _COLUMNS = (
     "target_token, target_decimals, target_symbol, buy_provider_id, sell_provider_id, "
     "raw_input, raw_acquired, raw_returned, "
     "raw_target_before_buy, raw_base_before_sell, buy_gas_wei, sell_gas_wei, raw_gas_cost, "
+    "buy_quoted_gas_units, sell_quoted_gas_units, buy_gas_units, sell_gas_units, "
     "buy_tx_hash, sell_tx_hash, "
     "opened_at, updated_at, closed_at, long_wait_notified_at"
 )
@@ -50,6 +51,10 @@ _MUTABLE = (
     "buy_gas_wei",
     "sell_gas_wei",
     "raw_gas_cost",
+    "buy_quoted_gas_units",
+    "sell_quoted_gas_units",
+    "buy_gas_units",
+    "sell_gas_units",
     "buy_tx_hash",
     "sell_tx_hash",
     "updated_at",
@@ -100,6 +105,10 @@ class SqlitePositionRepository:
                 _raw(position.buy_gas_wei),
                 _raw(position.sell_gas_wei),
                 _raw(position.raw_gas_cost),
+                _raw(position.buy_quoted_gas_units),
+                _raw(position.sell_quoted_gas_units),
+                _raw(position.buy_gas_units),
+                _raw(position.sell_gas_units),
                 position.buy_tx_hash,
                 position.sell_tx_hash,
                 to_timestamp(position.opened_at),
@@ -124,6 +133,10 @@ class SqlitePositionRepository:
                 _raw(position.buy_gas_wei),
                 _raw(position.sell_gas_wei),
                 _raw(position.raw_gas_cost),
+                _raw(position.buy_quoted_gas_units),
+                _raw(position.sell_quoted_gas_units),
+                _raw(position.buy_gas_units),
+                _raw(position.sell_gas_units),
                 position.buy_tx_hash,
                 position.sell_tx_hash,
                 to_timestamp(position.updated_at) if position.updated_at else None,
@@ -228,6 +241,10 @@ def _to_domain(row: aiosqlite.Row) -> Position:
         buy_gas_wei=_optional_raw(row, "buy_gas_wei"),
         sell_gas_wei=_optional_raw(row, "sell_gas_wei"),
         raw_gas_cost=_optional_raw(row, "raw_gas_cost"),
+        buy_quoted_gas_units=_optional_raw(row, "buy_quoted_gas_units"),
+        sell_quoted_gas_units=_optional_raw(row, "sell_quoted_gas_units"),
+        buy_gas_units=_optional_raw(row, "buy_gas_units"),
+        sell_gas_units=_optional_raw(row, "sell_gas_units"),
         buy_tx_hash=_optional_str(row, "buy_tx_hash"),
         sell_tx_hash=_optional_str(row, "sell_tx_hash"),
         opened_at=from_timestamp(str(column(row, "opened_at"))),

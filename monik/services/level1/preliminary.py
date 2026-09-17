@@ -21,6 +21,7 @@ from monik.domain.models.profit import ProfitCalculationInput, ProfitResult
 from monik.domain.models.quote import Quote
 from monik.services.calculator.profit import ProfitCalculator
 from monik.services.fees.context import FeeContext
+from monik.services.gas.round_trip import GasUnitsCorrection, round_trip_gas_units
 from monik.services.level1.ports import FeeSource, GasSource, RateSource
 from monik.services.prices.quoted import gas_rate_from_quotes
 from monik.services.registries.networks import NetworkRegistry
@@ -42,6 +43,7 @@ class PreliminaryEvaluator:
         tokens: TokenRegistry,
         networks: NetworkRegistry,
         profitability: ProfitabilityConfig,
+        gas_correction: GasUnitsCorrection | None = None,
     ) -> None:
         self._calculator = calculator
         self._fees = fees
@@ -50,6 +52,10 @@ class PreliminaryEvaluator:
         self._tokens = tokens
         self._networks = networks
         self._profitability = profitability
+        # Поправка к оценке расхода газа. ``None`` — считать по
+        # котировке как есть: так ведут себя тесты, которым
+        # поправка не нужна.
+        self._gas_correction = gas_correction
 
     async def evaluate(self, buy_quote: Quote, sell_quote: Quote, mode: ScanMode) -> ProfitResult:
         """Предварительный результат для одной суммы.
@@ -60,7 +66,7 @@ class PreliminaryEvaluator:
         fees = await self._collect_fees(buy_quote, sell_quote)
         gas = await self._gas.estimate(
             buy_quote.network_id,
-            gas_units=_total_gas_units(buy_quote, sell_quote),
+            gas_units=round_trip_gas_units(buy_quote, sell_quote, correction=self._gas_correction),
             quoted_price_wei=_quoted_gas_price(buy_quote, sell_quote),
             # Этап поиска не делает ради газа ни одного лишнего запроса:
             # берётся только то, что уже пришло вместе с котировкой.
@@ -145,14 +151,3 @@ def _quoted_gas_price(buy_quote: Quote, sell_quote: Quote) -> int | None:
         if quote.estimated_gas_price_wei is not None:
             return quote.estimated_gas_price_wei
     return None
-
-
-def _total_gas_units(buy_quote: Quote, sell_quote: Quote) -> int | None:
-    """Суммарная оценка газа round-trip.
-
-    Если хотя бы одна нога не сообщила оценку, суммарное значение
-    неизвестно — достраивать его нельзя.
-    """
-    if buy_quote.estimated_gas_units is None or sell_quote.estimated_gas_units is None:
-        return None
-    return buy_quote.estimated_gas_units + sell_quote.estimated_gas_units

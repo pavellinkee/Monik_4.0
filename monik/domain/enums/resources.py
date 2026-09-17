@@ -8,14 +8,25 @@ from monik.domain.enums.base import DomainEnum
 class RequestPriority(DomainEnum):
     """Приоритет запроса к внешнему ресурсу.
 
-    Порядок обслуживания (``CLAUDE.md`` §15, ``05_RESOURCE_MANAGER.md`` §16-20):
+    Порядок обслуживания (``CLAUDE.md`` §15, ``05_RESOURCE_MANAGER.md`` §16-20
+    в редакции ``the_main_rules.md``, правило 13):
 
-    ``LEVEL2`` > ``LEVEL1_SELL`` > ``LEVEL1_BUY`` > ``MAINTENANCE`` > ``BACKGROUND``.
+    ``EXECUTION`` > ``LEVEL2`` > ``LEVEL1_SELL`` > ``LEVEL1_BUY`` >
+    ``MAINTENANCE`` > ``BACKGROUND``.
+
+    ``EXECUTION`` стоит выше всего остального, потому что это единственные
+    запросы, от которых зависят уже потраченные деньги. Поиск, уступивший
+    очередь, теряет один цикл; сделка, уступившая очередь, держит купленный
+    токен дольше, чем живёт отклонение, ради которого он куплен.
 
     Прибыльность возможности **не** влияет на приоритет
-    (``04_SCHEDULER.md`` §26).
+    (``04_SCHEDULER.md`` §26): выше ставится род работы, а не её ожидаемый
+    доход.
     """
 
+    #: Запросы подсистемы исполнения: сборка сделки, проверка узлом,
+    #: котировка выхода у открытой позиции.
+    EXECUTION = "execution"
     LEVEL2 = "level2"
     LEVEL1_SELL = "level1_sell"
     LEVEL1_BUY = "level1_buy"
@@ -33,11 +44,12 @@ class RequestPriority(DomainEnum):
 
 
 _PRIORITY_RANKS: dict[RequestPriority, int] = {
-    RequestPriority.LEVEL2: 0,
-    RequestPriority.LEVEL1_SELL: 1,
-    RequestPriority.LEVEL1_BUY: 2,
-    RequestPriority.MAINTENANCE: 3,
-    RequestPriority.BACKGROUND: 4,
+    RequestPriority.EXECUTION: 0,
+    RequestPriority.LEVEL2: 1,
+    RequestPriority.LEVEL1_SELL: 2,
+    RequestPriority.LEVEL1_BUY: 3,
+    RequestPriority.MAINTENANCE: 4,
+    RequestPriority.BACKGROUND: 5,
 }
 
 

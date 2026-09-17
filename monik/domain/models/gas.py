@@ -8,13 +8,14 @@ from typing import Self
 from pydantic import Field, model_validator
 
 from monik.domain.enums.fees import CostInclusion, FeeStatus
+from monik.domain.enums.providers import ProviderId
 from monik.domain.models.base import DomainModel
 from monik.domain.models.token import TokenKey
 from monik.domain.value_objects.identity import NetworkId
 from monik.domain.value_objects.numeric import NonNegativeDecimal
 from monik.domain.value_objects.timestamps import UtcDatetime
 
-__all__ = ["Gas", "GasPrice"]
+__all__ = ["Gas", "GasCalibrationSample", "GasPrice"]
 
 
 class GasPrice(DomainModel):
@@ -117,3 +118,29 @@ class Gas(DomainModel):
         if self.cost_native is None:
             raise ValueError("gas cost is unknown and must not be treated as zero")
         return self.cost_native
+
+
+class GasCalibrationSample(DomainModel):
+    """Накопленное расхождение между обещанным и фактическим расходом газа.
+
+    Агрегатор оценивает голый обмен по одному лучшему пути, а платим мы за
+    реальный вызов роутера, маршрут которого на исполнении может разойтись
+    на несколько пулов. Отношение факта к обещанному и есть поправка.
+
+    Хранятся итоги, а не отдельные замеры: поправка — одно число, и
+    история каждой транзакции для неё не нужна (``CLAUDE.md`` §28).
+    """
+
+    network_id: NetworkId
+    provider_id: ProviderId
+    samples: int = Field(ge=0)
+    quoted_units: int = Field(ge=0)
+    actual_units: int = Field(ge=0)
+    updated_at: UtcDatetime
+
+    @property
+    def factor(self) -> Decimal | None:
+        """Отношение факта к обещанному. ``None`` — считать не из чего."""
+        if self.quoted_units <= 0:
+            return None
+        return Decimal(self.actual_units) / Decimal(self.quoted_units)

@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from monik.domain.enums.providers import ProviderId
 from monik.domain.models.position import Position
 from monik.domain.models.token import Token
 from monik.domain.value_objects.identity import NetworkId
 
-__all__ = ["ExecutionCosts", "PositionStore", "SequenceSource"]
+__all__ = ["ExecutionCosts", "GasCalibrationRecorder", "PositionStore", "SequenceSource"]
 
 
 @runtime_checkable
@@ -59,4 +60,25 @@ class ExecutionCosts(Protocol):
         self, network_id: NetworkId, base_token: Token, *, wei: int
     ) -> int | None:
         """Стоимость ``wei`` газа в base units. ``None`` — неизвестна."""
+        ...
+
+
+@runtime_checkable
+class GasCalibrationRecorder(Protocol):
+    """Приёмник замеров расхода газа.
+
+    Подсистема исполнения — единственное место, где известен **факт**:
+    сколько газа вызов потребовал на самом деле. Поиск этого не узнаёт
+    никогда, поэтому замер передаётся отсюда.
+    """
+
+    async def record(
+        self,
+        network_id: NetworkId,
+        provider_id: ProviderId,
+        *,
+        quoted_units: int,
+        actual_units: int,
+    ) -> None:
+        """Учесть один исполненный вызов."""
         ...

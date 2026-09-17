@@ -16,6 +16,7 @@ EXPECTED_TABLES = {
     "id_sequences",
     "level2_amount_results",
     "level2_attempts",
+    "gas_calibration",
     "level2_jobs",
     "notification_attempts",
     "notifications",

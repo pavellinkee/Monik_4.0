@@ -521,6 +521,10 @@ def _capability_task(container: Container) -> TaskHandler:
 
     async def run() -> None:
         await container.capabilities.load()
+        if container.calibration is not None:
+            # Поправка к оценке газа поднимается тем же шагом: она такое
+            # же сохранённое состояние, накопленное прошлыми сделками.
+            await container.calibration.load()
 
     return run
 

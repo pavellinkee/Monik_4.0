@@ -13,6 +13,9 @@ from monik.infrastructure.db.migrations.m0004_positions import MIGRATION as MIGR
 from monik.infrastructure.db.migrations.m0005_position_costs import (
     MIGRATION as MIGRATION_0005,
 )
+from monik.infrastructure.db.migrations.m0006_gas_calibration import (
+    MIGRATION as MIGRATION_0006,
+)
 
 #: Все миграции в порядке применения.
 ALL_MIGRATIONS: tuple[Migration, ...] = (
@@ -21,6 +24,7 @@ ALL_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_0003,
     MIGRATION_0004,
     MIGRATION_0005,
+    MIGRATION_0006,
 )
 
 __all__ = ["ALL_MIGRATIONS", "Migration"]

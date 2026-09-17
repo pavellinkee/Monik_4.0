@@ -8,6 +8,10 @@ token остаётся на газ.
 Запросы идут через Resource Manager (``CLAUDE.md`` §14) тем же путём,
 что и проверка адресов токенов: для ядра это ещё один внешний ресурс с
 именем ``rpc``, а не особый случай.
+
+Приоритет у них наивысший (``the_main_rules.md``, правило 13). Это
+запросы, от которых зависят уже потраченные деньги: поиск, уступивший
+очередь, теряет один цикл, а сделка — купленный токен.
 """
 
 from __future__ import annotations
@@ -328,7 +332,7 @@ class ChainAccount:
             ),
             # Деньги проверяются перед сделкой, поэтому запрос не может
             # ждать в общей очереди обслуживания.
-            priority=RequestPriority.LEVEL2,
+            priority=RequestPriority.EXECUTION,
             timeout=self._timeout,
             created_at=self._clock.now(),
             sequence=0,

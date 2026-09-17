@@ -61,6 +61,7 @@ from monik.repositories.sqlite import (
     SqliteSchedulerRepository,
     SqliteStateTransitionRepository,
 )
+from monik.repositories.sqlite.gas_calibration import SqliteGasCalibrationRepository
 from monik.repositories.sqlite.positions import SqlitePositionRepository
 from monik.services.backup import BackupService
 from monik.services.calculator import ProfitCalculator
@@ -74,6 +75,7 @@ from monik.services.commands import (
 )
 from monik.services.fees.policy import FeePolicy, QuoteInclusiveFeePolicy
 from monik.services.fees.service import FeeService
+from monik.services.gas.calibration import GasCalibration
 from monik.services.gas.estimator import GasEstimator
 from monik.services.gas.providers import (
     GasPriceProvider,
@@ -200,6 +202,10 @@ class Container:
     updater: SystemUpdater | None = None
     #: Сверка адресов токенов с сетью. Выполняется один раз при старте.
     token_check: TokenAddressCheck | None = None
+    #: Поправка к оценке расхода газа. Накопленное поднимается при
+    #: старте: иначе каждый перезапуск возвращал бы Monik к завышенной
+    #: оценке, пока замеры не накопятся заново.
+    calibration: GasCalibration | None = None
     #: Торговый счёт режима ann. ``None`` — ключ не настроен, и
     #: подсистема исполнения собрана быть не может.
     wallet: TradingWallet | None = None
@@ -335,9 +341,19 @@ def build_container(
         destinations=_destinations(loaded),
         renderer=formatter,
     )
+    # Поправка к оценке расхода газа. Общая для поиска и исполнения:
+    # исполнение её пополняет замерами, поиск ею пользуется.
+    calibration = GasCalibration(
+        config=config.gas.calibration,
+        clock=clock,
+        default_multiplier=config.gas.quote_estimate_multiplier,
+        per_provider=dict(config.gas.quote_estimate_multipliers),
+        store=SqliteGasCalibrationRepository(database),
+    )
     level2_worker, level2 = _build_level2(
         config,
         adapters=provider_adapters,
+        calibration=calibration,
         capabilities=capabilities,
         calculator=calculator,
         fees=fees,
@@ -353,6 +369,7 @@ def build_container(
     level1 = _build_level1(
         config,
         adapters=provider_adapters,
+        calibration=calibration,
         capabilities=capabilities,
         calculator=calculator,
         fees=fees,
@@ -428,6 +445,7 @@ def build_container(
             str(network.network_id): _base_decimals(config, network.network_id)
             for network in config.enabled_networks
         }
+        gas_costs = GasCostConverter(tokens=tokens, networks=networks, rates=conversion)
         executor = TradeExecutor(
             adapters={key.value: value for key, value in provider_adapters.items()},
             positions=positions_store,
@@ -435,9 +453,18 @@ def build_container(
             account=chain_account,
             sender=sender,
             tokens=tokens,
+            calculator=calculator,
+            costs=gas_costs,
+            calibration=calibration,
             clock=clock,
             is_execution_open=lambda: trading_switch.is_open,
             slippage_bps=int(config.trading.slippage_percent * 100),
+            # Не открываем того, что не сможем закрыть: порог входа — тот
+            # же, при котором подсистема согласна выйти из уже открытой
+            # сделки.
+            min_entry_profit_raw=int(
+                config.trading.min_exit_profit_waiting * (10 ** max(base_decimals.values()))
+            ),
             receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
             receipt_poll_seconds=config.trading.receipt_poll_seconds,
         )
@@ -447,7 +474,8 @@ def build_container(
             account=chain_account,
             sender=sender,
             executor=executor,
-            costs=GasCostConverter(tokens=tokens, networks=networks, rates=conversion),
+            costs=gas_costs,
+            calibration=calibration,
             clock=clock,
             # Порог выхода задан в базовом токене. Сети могут отличаться
             # знаками базового токена, поэтому берётся максимум: занижать
@@ -519,6 +547,7 @@ def build_container(
         backups=backups,
         updater=updater,
         token_check=token_check,
+        calibration=calibration,
         wallet=wallet,
         chain_account=chain_account,
         trading=trading_switch,
@@ -717,6 +746,7 @@ def _build_level2(
     config: Configuration,
     *,
     adapters: dict[ProviderId, AggregatorAdapter],
+    calibration: GasCalibration,
     capabilities: CapabilityRegistry,
     calculator: ProfitCalculator,
     fees: FeeService,
@@ -745,6 +775,7 @@ def _build_level2(
             tokens=tokens,
             networks=networks,
             profitability=config.profitability,
+            gas_correction=calibration,
         ),
         tokens,
     )
@@ -781,6 +812,7 @@ def _build_level1(
     config: Configuration,
     *,
     adapters: dict[ProviderId, AggregatorAdapter],
+    calibration: GasCalibration,
     capabilities: CapabilityRegistry,
     calculator: ProfitCalculator,
     fees: FeeService,
@@ -812,6 +844,7 @@ def _build_level1(
             tokens=tokens,
             networks=networks,
             profitability=config.profitability,
+            gas_correction=calibration,
         ),
         opportunities=repositories.opportunities,
         scans=repositories.scans,

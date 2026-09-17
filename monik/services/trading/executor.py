@@ -21,19 +21,27 @@ from datetime import timedelta
 from decimal import Decimal
 
 from monik.domain.enums.operations import OperationType
+from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
+from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.opportunity import Candidate
 from monik.domain.models.position import Position
 from monik.domain.models.token import Token
 from monik.domain.value_objects.identifiers import RequestId, TId
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.providers.contract import AggregatorAdapter, QuoteRequest
+from monik.services.calculator import ProfitCalculator
 from monik.services.level1.results import ScanResult
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.registries.tokens import TokenRegistry
 from monik.services.trading.chain import ChainAccount, TransactionReceipt
-from monik.services.trading.ports import PositionStore, SequenceSource
+from monik.services.trading.ports import (
+    ExecutionCosts,
+    GasCalibrationRecorder,
+    PositionStore,
+    SequenceSource,
+)
 from monik.services.trading.sender import TransactionSender
 
 __all__ = ["TradeExecutor"]
@@ -65,9 +73,13 @@ class TradeExecutor:
         account: ChainAccount,
         sender: TransactionSender,
         tokens: TokenRegistry,
+        calculator: ProfitCalculator,
+        costs: ExecutionCosts,
+        calibration: GasCalibrationRecorder | None,
         clock: Clock,
         is_execution_open: Callable[[], bool],
         slippage_bps: int,
+        min_entry_profit_raw: int,
         receipt_timeout_seconds: int = 120,
         receipt_poll_seconds: int = 2,
     ) -> None:
@@ -77,9 +89,13 @@ class TradeExecutor:
         self._account = account
         self._sender = sender
         self._tokens = tokens
+        self._calculator = calculator
+        self._costs = costs
+        self._calibration = calibration
         self._clock = clock
         self._is_execution_open = is_execution_open
         self._slippage_bps = slippage_bps
+        self._min_entry_profit_raw = min_entry_profit_raw
         self._receipt_timeout = timedelta(seconds=receipt_timeout_seconds)
         self._receipt_poll = timedelta(seconds=receipt_poll_seconds)
         #: Немедленная проверка выхода после удачной покупки. Ставится
@@ -168,6 +184,93 @@ class TradeExecutor:
         reserved = await self._positions.reserved_raw_input(network_id)
         return max(balance.raw - reserved, 0)
 
+    async def _costs_allow(
+        self, choice: _Choice, adapter: AggregatorAdapter, buy: SwapTransaction
+    ) -> bool:
+        """Проверить находку по **точной** стоимости круга.
+
+        Поиск оценивает газ по числу из котировки — оно приходит бесплатно,
+        но считает голый обмен по одному лучшему пути. Здесь, у одного
+        кандидата, уже собрана настоящая транзакция покупки, и собрать
+        вторую ногу стоит один запрос. За проход таких проверок ноль или
+        одна, тогда как комбинаций двенадцать, поэтому точность обходится
+        в сотые доли расхода на поиск.
+
+        Если стоимость посчитать не удалось, сделка не отменяется: поиск
+        уже учёл газ с поправкой, и отказывать из-за недоступной уточняющей
+        проверки значило бы терять возможности на ровном месте. Об этом
+        остаётся запись в журнале.
+        """
+        candidate = choice.candidate
+        preliminary = candidate.preliminary_result
+        sell = await self._build_exit(choice, adapter)
+        if sell is None:
+            return True
+        price = await self._account.gas_price(choice.base.network_id)
+        exact_raw = await self._costs.to_base_raw(
+            choice.base.network_id,
+            choice.base,
+            wei=(buy.gas_limit + sell.gas_limit) * price,
+        )
+        if exact_raw is None:
+            return True
+        scale = Decimal(10) ** choice.base.decimals
+        # Пересчёт делает Calculator: замена слагаемого в формуле прибыли —
+        # это та же формула, и жить она обязана там же.
+        profit = self._calculator.net_profit_with_gas(
+            preliminary, gas_cost=Decimal(exact_raw) / scale
+        )
+        if profit is None:
+            return True
+        profit_raw = int(profit * scale)
+        fields = self._describe(choice) | {
+            "quoted_gas_units": (candidate.buy_quote.estimated_gas_units or 0)
+            + (candidate.sell_quote.estimated_gas_units or 0),
+            "exact_gas_units": buy.gas_limit + sell.gas_limit,
+            "gas_price_wei": price,
+            "expected_profit": str(Decimal(profit_raw) / scale),
+            "needed": str(Decimal(self._min_entry_profit_raw) / scale),
+        }
+        if profit_raw < self._min_entry_profit_raw:
+            # Не открываем того, что не сможем закрыть: порог здесь тот же,
+            # при котором подсистема согласна выйти из уже открытой сделки.
+            _LOGGER.info(
+                "trade skipped: the exact cost of the circle eats the profit", extra=fields
+            )
+            return False
+        _LOGGER.info("trade cost verified", extra=fields)
+        return True
+
+    async def _build_exit(
+        self, choice: _Choice, adapter: AggregatorAdapter
+    ) -> SwapTransaction | None:
+        """Собрать ногу продажи ради её предела газа.
+
+        Токена на счёте ещё нет, и узел оценить вызов не смог бы — он
+        откатился бы. Агрегатор же собирает транзакцию по котировке, а не
+        по остатку, и предел газа называет. Если всё-таки откажет, вернём
+        ``None``: это уточнение, а не условие сделки.
+        """
+        try:
+            return await adapter.build_swap(
+                QuoteRequest(
+                    network_id=choice.base.network_id,
+                    operation=OperationType.SELL,
+                    input_token=choice.target,
+                    output_token=choice.base,
+                    input_amount=choice.candidate.buy_quote.output_amount,
+                    request_id=RequestId.generate(),
+                    slippage_bps=self._slippage_bps,
+                    priority=RequestPriority.EXECUTION,
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - уточнение не обязано удаваться
+            _LOGGER.info(
+                "exact cost unavailable: the exit leg could not be built",
+                extra=log_fields(t_id="", error=type(error).__name__, detail=str(error)),
+            )
+            return None
+
     # --- открытие ---------------------------------------------------------
 
     async def _open(self, choice: _Choice) -> Position | None:
@@ -186,8 +289,13 @@ class TradeExecutor:
                 input_amount=candidate.buy_quote.input_amount,
                 request_id=RequestId.generate(),
                 slippage_bps=self._slippage_bps,
+                # Сделка обслуживается раньше поиска
+                # (``the_main_rules.md``, правило 13).
+                priority=RequestPriority.EXECUTION,
             )
         )
+        if not await self._costs_allow(choice, adapter, transaction):
+            return None
         simulation = await self._account.simulate(transaction)
         if not simulation.succeeded:
             _LOGGER.warning(
@@ -212,10 +320,12 @@ class TradeExecutor:
             # разностью, а досчитать её может уже другой процесс, если
             # квитанция придёт после перезапуска.
             raw_target_before_buy=before.raw,
+            buy_quoted_gas_units=candidate.buy_quote.estimated_gas_units,
             # На продажу пока не потрачено ничего, и это знание, а не
             # пробел: пустое поле означало бы «неизвестно», и стоимость
             # круга не сошлась бы вовсе.
             sell_gas_wei=0,
+            sell_gas_units=0,
             opened_at=now,
         )
         # Запись делается ДО отправки: иначе перезапуск между отправкой и
@@ -271,6 +381,8 @@ class TradeExecutor:
         """
         now = self._clock.now()
         gas_wei = None if receipt is None else receipt.gas_cost_wei
+        gas_units = None if receipt is None else receipt.gas_used
+        await self._record_calibration(position, gas_units)
         if not succeeded:
             updated = position.model_copy(
                 update={
@@ -279,6 +391,7 @@ class TradeExecutor:
                     "closed_at": now,
                     "raw_returned": position.raw_input,
                     "buy_gas_wei": gas_wei,
+                    "buy_gas_units": gas_units,
                 }
             )
             await self._positions.update(updated)
@@ -294,6 +407,7 @@ class TradeExecutor:
                 "status": PositionStatus.HOLDING,
                 "raw_acquired": max(acquired, 1),
                 "buy_gas_wei": gas_wei,
+                "buy_gas_units": gas_units,
                 "updated_at": now,
             }
         )
@@ -307,6 +421,25 @@ class TradeExecutor:
             ),
         )
         return updated
+
+    async def _record_calibration(self, position: Position, actual_units: int | None) -> None:
+        """Передать замер расхода газа покупки.
+
+        Обещанное котировкой и потраченное на самом деле известны здесь
+        оба, и оба уже получены: одно пришло с котировкой, другое — с
+        квитанцией, которую подсистема запрашивает в любом случае. Замер
+        не стоит ни одного дополнительного обращения.
+        """
+        if self._calibration is None or actual_units is None:
+            return
+        if position.buy_quoted_gas_units is None:
+            return
+        await self._calibration.record(
+            position.network_id,
+            position.buy_provider_id,
+            quoted_units=position.buy_quoted_gas_units,
+            actual_units=actual_units,
+        )
 
     def _describe(self, choice: _Choice) -> dict[str, object]:
         result = choice.candidate.preliminary_result

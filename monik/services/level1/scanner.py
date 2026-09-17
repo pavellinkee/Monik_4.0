@@ -436,6 +436,12 @@ class Level1Scanner:
                 # пара почти всегда впереди просто потому, что теряет
                 # меньше, и по общему лучшему результату не видно, как
                 # близко было у остальных.
+                # Разбивка газа: по итоговой стоимости не видно, в чём
+                # ошибка — в расходе или в цене. Единицы обещанные, без
+                # поправки: применённую поправку пишет сама калибровка.
+                best_gas_cost=None if best is None else str(best.gas_cost),
+                best_quoted_gas_units=None if best is None else best.quoted_gas_units,
+                best_gas_price_wei=None if best is None else best.gas_price_wei,
                 best_volatile_net_roi=(
                     None if best_volatile is None else str(best_volatile.net_roi.value)
                 ),
@@ -580,7 +586,25 @@ def _best_combination(candidates: tuple[Candidate, ...]) -> BestCombination | No
         token=best.buy_quote.output_token,
         buy_provider=best.buy_quote.provider_id,
         sell_provider=best.sell_quote.provider_id,
+        gas_cost=None if result.costs is None else result.costs.gas_cost,
+        quoted_gas_units=_quoted_units(best),
+        gas_price_wei=_quoted_price(best),
     )
+
+
+def _quoted_units(candidate: Candidate) -> int | None:
+    """Сколько газа обещали котировки обеих ног, без поправки."""
+    buy = candidate.buy_quote.estimated_gas_units
+    sell = candidate.sell_quote.estimated_gas_units
+    return None if buy is None or sell is None else buy + sell
+
+
+def _quoted_price(candidate: Candidate) -> int | None:
+    """Цена газа из котировки. Достаточно, чтобы её назвала одна нога."""
+    for quote in (candidate.buy_quote, candidate.sell_quote):
+        if quote.estimated_gas_price_wei is not None:
+            return quote.estimated_gas_price_wei
+    return None
 
 
 def _passes_preliminary_threshold(candidate: Candidate) -> bool:

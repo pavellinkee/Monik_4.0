@@ -582,3 +582,37 @@ def test_gas_price_components_are_integers() -> None:
     )
     assert isinstance(gas.gas_units, int)
     assert isinstance(price.wei_per_gas, int)
+
+
+class TestRepricedGas:
+    """Замена стоимости газа — та же формула прибыли.
+
+    Поиск считает газ по оценке из котировки: она бесплатна, но
+    приблизительна. Перед самой сделкой стоимость известна точно, и
+    вопрос «сколько останется при этой стоимости» обязан решаться здесь,
+    а не в подсистеме исполнения (``CLAUDE.md`` §25,
+    ``09_PROFIT_CALCULATOR.md`` §2).
+    """
+
+    def test_exact_cost_replaces_the_estimated_one(self, calculator: ProfitCalculator) -> None:
+        # В результате фабрики газ стоил 0, а чистая прибыль — 1.50.
+        result = f.profit_result()
+
+        repriced = calculator.net_profit_with_gas(result, gas_cost=Decimal("0.40"))
+
+        assert repriced == Decimal("1.10")
+
+    def test_repricing_is_reversible(self, calculator: ProfitCalculator) -> None:
+        """Подстановка прежней стоимости возвращает прежнюю прибыль."""
+        result = f.profit_result()
+        assert result.costs is not None
+
+        repriced = calculator.net_profit_with_gas(result, gas_cost=result.costs.gas_cost)
+
+        assert repriced == result.net_profit
+
+    def test_incomplete_result_cannot_be_repriced(self, calculator: ProfitCalculator) -> None:
+        """Заменять слагаемое в неизвестной сумме нечего."""
+        result = f.profit_result(status=CalculationStatus.UNKNOWN)
+
+        assert calculator.net_profit_with_gas(result, gas_cost=Decimal("0.40")) is None

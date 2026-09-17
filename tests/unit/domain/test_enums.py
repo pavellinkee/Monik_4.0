@@ -98,10 +98,16 @@ def test_provider_set_matches_approved_providers() -> None:
     }
 
 
-def test_priority_order_is_level2_first() -> None:
-    """Level 2 > Level 1 SELL > Level 1 BUY > Maintenance (CLAUDE.md §15)."""
+def test_priority_order_is_execution_first() -> None:
+    """Исполнение > Level 2 > Level 1 SELL > Level 1 BUY > Maintenance.
+
+    ``CLAUDE.md`` §15 в редакции ``the_main_rules.md``, правило 13: запросы
+    подсистемы исполнения обслуживаются раньше любых поисковых. Поиск,
+    уступивший очередь, теряет один цикл; сделка — купленный токен.
+    """
     ordered = sorted(RequestPriority, key=lambda p: p.rank)
     assert ordered == [
+        RequestPriority.EXECUTION,
         RequestPriority.LEVEL2,
         RequestPriority.LEVEL1_SELL,
         RequestPriority.LEVEL1_BUY,
