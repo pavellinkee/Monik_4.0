@@ -29,7 +29,7 @@ from tests.unit.trading.support import (
     build_account,
     build_sender,
 )
-from tests.unit.trading.test_executor import _tokens
+from tests.unit.trading.test_executor import _candidate, _result, _tokens
 
 # Купили AAVE на 50 USDT. Курс адаптера задаётся правилом обмена.
 ACQUIRED = 5_000_000_000_000_000_000
@@ -249,3 +249,71 @@ class TestRecovery:
         await watcher.tick()
 
         assert positions.items["#T1"].status is PositionStatus.CLOSED
+
+
+class TestImmediateExit:
+    """После покупки цена выхода спрашивается сразу, а не через такт.
+
+    Правило оператора: «вначале производится покупка, затем ещё раз
+    производится проверка, выгодно ли совершить продажу; если результат
+    не положительный — сделка остаётся в ожидании». Именно сразу после
+    покупки шанс выйти в плюс наивысший.
+    """
+
+    def _node(self, *, acquired: int) -> ScriptedNode:
+        """Узел, у которого покупка действительно меняет остаток."""
+        return ScriptedNode(
+            balances={str(f.USDT.address).lower(): 60_000_000},
+            after_send={str(f.AAVE.address).lower(): acquired},
+        )
+
+    def _pair(
+        self, node: ScriptedNode, positions: MemoryPositions, *, sell_rate: str
+    ) -> tuple[TradeExecutor, PositionWatcher]:
+        watcher = _watcher(node, positions, sell_rate=sell_rate)
+        executor = watcher._executor  # noqa: SLF001 - связка собирается контейнером
+        executor.set_exit_check(watcher.consider_now)
+        return executor, watcher
+
+    async def test_profitable_exit_happens_without_waiting_for_the_scheduler(self) -> None:
+        node = self._node(acquired=ACQUIRED)
+        positions = MemoryPositions()
+        executor, _ = self._pair(node, positions, sell_rate="10.1")
+
+        position = await executor.consider((_ann_result(),))
+
+        assert position is not None
+        # Такт наблюдателя не запускался ни разу — продажа ушла из покупки.
+        assert positions.items[str(position.t_id)].status is PositionStatus.CLOSED
+
+    async def test_unprofitable_exit_leaves_the_trade_waiting(self) -> None:
+        node = self._node(acquired=ACQUIRED)
+        positions = MemoryPositions()
+        executor, _ = self._pair(node, positions, sell_rate="10.000002")
+
+        position = await executor.consider((_ann_result(),))
+
+        assert position is not None
+        assert positions.items[str(position.t_id)].status is PositionStatus.HOLDING
+
+    async def test_a_failed_immediate_check_does_not_lose_the_trade(self) -> None:
+        """Сделка уже открыта: сбой проверки не должен её потерять."""
+        node = self._node(acquired=ACQUIRED)
+        positions = MemoryPositions()
+        executor, watcher = self._pair(node, positions, sell_rate="10.1")
+
+        async def broken(position: Position) -> None:
+            raise RuntimeError("узел недоступен")
+
+        executor.set_exit_check(lambda p: watcher.consider_now(p))
+        watcher._consider_exit = broken  # noqa: SLF001 - имитация сбоя узла
+
+        position = await executor.consider((_ann_result(),))
+
+        assert position is not None
+        assert positions.items[str(position.t_id)].status is PositionStatus.HOLDING
+
+
+def _ann_result():  # noqa: ANN202
+    """Находка режима ann, на которую исполнитель откроет сделку."""
+    return _result(_candidate(50_000_000, "0.1"))

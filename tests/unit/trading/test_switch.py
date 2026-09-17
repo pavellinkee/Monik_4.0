@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 from monik.app.control import TradingSwitch
 
 
@@ -47,3 +49,12 @@ class TestRestartSafety:
         Перезапуск — момент, когда состояние счёта и рынка неизвестно.
         """
         assert TradingSwitch(allowed=True).is_open is False
+
+
+class TestWiring:
+    """Немедленная проверка выхода должна быть подключена сборкой."""
+
+    def test_container_wires_the_exit_check(self) -> None:
+        """Иначе правило «проверить сразу» осталось бы только на словах."""
+        source = pathlib.Path("monik/app/container.py").read_text(encoding="utf-8")
+        assert "executor.set_exit_check(watcher.consider_now)" in source

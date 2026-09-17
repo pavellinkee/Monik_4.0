@@ -108,6 +108,24 @@ class PositionWatcher:
                 notices.append(notice)
         return tuple(notices)
 
+    async def consider_now(self, position: Position) -> None:
+        """Проверить выход у одной сделки немедленно.
+
+        Вызывается исполнителем сразу после удачной покупки. Отдельный
+        вход, а не полный такт: остальные сделки в этот момент трогать
+        незачем, и обход всего списка только задержал бы проверку той,
+        ради которой он затеян.
+        """
+        try:
+            await self._consider_exit(position)
+        except Exception as error:  # noqa: BLE001 - сделка уже открыта, её ведёт наблюдатель
+            _LOGGER.error(
+                "immediate exit check failed",
+                extra=log_fields(
+                    t_id=str(position.t_id), error=type(error).__name__, detail=str(error)
+                ),
+            )
+
     async def _advance(self, position: Position) -> LongWaitNotice | None:
         if position.status is PositionStatus.BUYING:
             await self._settle_pending_buy(position)

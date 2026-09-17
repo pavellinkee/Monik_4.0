@@ -70,10 +70,16 @@ class ScriptedNode:
         self,
         *,
         balances: dict[str, int] | None = None,
+        after_send: dict[str, int] | None = None,
         simulation_ok: bool = True,
         receipt_ok: bool | None = True,
     ) -> None:
         self.balances = dict(balances or {})
+        #: Остатки, которые узел начинает показывать **после** первой
+        #: отправки. Так стенд повторяет главное свойство цепи: покупка
+        #: меняет баланс, и полученное количество узнаётся из него, а не
+        #: из котировки.
+        self.after_send = dict(after_send or {})
         self.simulation_ok = simulation_ok
         self.receipt_ok = receipt_ok
         self.sent: list[str] = []
@@ -86,6 +92,8 @@ class ScriptedNode:
             data = str(params[0].get("data", ""))
             if data.startswith("0x70a08231"):
                 token = str(params[0].get("to", "")).lower()
+                if self.sent and token in self.after_send:
+                    return _ok(hex(self.after_send[token]))
                 return _ok(hex(self.balances.get(token, 0)))
             if self.simulation_ok:
                 return _ok("0x")

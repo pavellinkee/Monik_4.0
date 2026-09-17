@@ -459,6 +459,10 @@ def build_container(
             receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
             receipt_poll_seconds=config.trading.receipt_poll_seconds,
         )
+        # Покупка сразу спрашивает цену выхода, не дожидаясь такта
+        # расписания: отклонение, ради которого сделка открыта, живёт
+        # минуты, и пять секунд ожидания на ровном месте его теряют.
+        executor.set_exit_check(watcher.consider_now)
     commands = _build_commands(
         loaded,
         repositories=repositories,

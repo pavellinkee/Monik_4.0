@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -82,6 +82,22 @@ class TradeExecutor:
         self._slippage_bps = slippage_bps
         self._receipt_timeout = timedelta(seconds=receipt_timeout_seconds)
         self._receipt_poll = timedelta(seconds=receipt_poll_seconds)
+        #: Немедленная проверка выхода после удачной покупки. Ставится
+        #: снаружи, потому что решение о продаже принимает наблюдатель, а
+        #: он сам зависит от исполнителя.
+        self._check_exit: Callable[[Position], Awaitable[None]] | None = None
+
+    def set_exit_check(self, check: Callable[[Position], Awaitable[None]]) -> None:
+        """Задать проверку выхода, выполняемую сразу после покупки.
+
+        Правило оператора: «вначале производится покупка, затем **ещё
+        раз** производится проверка, выгодно ли совершить продажу; если
+        результат не положительный — сделка остаётся в ожидании».
+        Немедленная проверка не заменяется периодической: именно сразу
+        после покупки шанс выйти в плюс наивысший — расхождение, ради
+        которого сделка открылась, ещё живо, а живёт оно минуты.
+        """
+        self._check_exit = check
 
     async def consider(self, results: tuple[ScanResult, ...]) -> Position | None:
         """Рассмотреть находки прохода и, если можно, открыть сделку.
@@ -222,7 +238,15 @@ class TradeExecutor:
             # доведёт её. Считать её неудачной нельзя: транзакция может
             # попасть в блок позже.
             return position
-        return await self.settle_buy(position, succeeded=receipt.succeeded, before_raw=before.raw)
+        settled = await self.settle_buy(
+            position, succeeded=receipt.succeeded, before_raw=before.raw
+        )
+        if settled.status is PositionStatus.HOLDING and self._check_exit is not None:
+            # Не ждём следующего такта расписания: между покупкой и первой
+            # проверкой прошло бы до десяти секунд, а отклонение столько
+            # может и не прожить.
+            await self._check_exit(settled)
+        return settled
 
     async def settle_buy(
         self, position: Position, *, succeeded: bool, before_raw: int | None = None
