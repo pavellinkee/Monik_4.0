@@ -37,7 +37,11 @@ from monik.domain.errors import (
     MonikError,
     UnsupportedError,
 )
-from monik.domain.models.execution import SwapTransaction
+from monik.domain.models.execution import (
+    AllowanceKind,
+    AllowanceRequirement,
+    SwapTransaction,
+)
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
 from monik.domain.models.route import Route, RouteStep
@@ -253,9 +257,23 @@ class UniswapAdapter(HttpProviderAdapter):
                 provider=_PROVIDER,
                 field="gasLimit",
             ),
-            # Роутер списывает входной токен не напрямую, а через Permit2:
-            # разрешение выдаётся ему, а не адресу из поля ``to``.
-            spender=endpoints.PERMIT2_ADDRESS,
+            # Разрешение двухступенчатое, и это особенность Uniswap.
+            # Токен разрешает списание контракту Permit2, а Permit2
+            # отдельно разрешает списание роутеру. Без второго шага обмен
+            # откатывается с AllowanceExpired(0) — проверено живым
+            # вызовом 2026-09-17.
+            allowances=(
+                AllowanceRequirement(
+                    kind=AllowanceKind.ERC20,
+                    contract=str(request.input_token.address),
+                    spender=endpoints.PERMIT2_ADDRESS,
+                ),
+                AllowanceRequirement(
+                    kind=AllowanceKind.PERMIT2,
+                    contract=endpoints.PERMIT2_ADDRESS,
+                    spender=str(require_field(swap, "to", provider=_PROVIDER)),
+                ),
+            ),
             quote=quote,
             min_output_raw=minimum,
         )

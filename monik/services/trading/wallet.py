@@ -15,6 +15,7 @@ from typing import Any
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
+from eth_utils.address import to_checksum_address
 
 from monik.config.secrets import SecretValue
 from monik.domain.errors import ConfigurationError
@@ -45,8 +46,20 @@ class TradingWallet:
         return str(self._account.address)
 
     def sign_transaction(self, transaction: dict[str, Any]) -> bytes:
-        """Подписать транзакцию и вернуть её в виде байтов для отправки."""
-        signed = self._account.sign_transaction(transaction)
+        """Подписать транзакцию и вернуть её в виде байтов для отправки.
+
+        Адреса приводятся к контрольному регистру EIP-55. Внутри Monik
+        адрес канонически хранится в нижнем регистре — так он сравнивается
+        без оговорок, — а библиотека подписи принимает только запись с
+        контрольной суммой. Это различие форматов и остаётся здесь, у
+        границы с библиотекой, а не расползается по вызывающему коду.
+        """
+        prepared = dict(transaction)
+        for field in ("to", "from"):
+            value = prepared.get(field)
+            if isinstance(value, str):
+                prepared[field] = to_checksum_address(value)
+        signed = self._account.sign_transaction(prepared)
         return bytes(signed.raw_transaction)
 
     def __repr__(self) -> str:

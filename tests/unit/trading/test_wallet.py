@@ -107,3 +107,43 @@ class TestSigning:
         }
         raw = wallet.sign_transaction(transaction)
         assert Account.recover_transaction(raw) == wallet.address
+
+
+class TestAddressFormat:
+    """Адрес внутри Monik — в нижнем регистре, библиотеке нужен EIP-55."""
+
+    def test_lowercase_recipient_is_accepted(self, key: str) -> None:
+        """Каноническая запись адреса не должна ломать подпись."""
+        wallet = TradingWallet(_secret(key))
+        transaction = {
+            "to": wallet.address.lower(),
+            "value": 0,
+            "gas": 21_000,
+            "maxFeePerGas": 1_000_000_000,
+            "maxPriorityFeePerGas": 0,
+            "nonce": 0,
+            "chainId": 137,
+            "data": b"",
+        }
+
+        raw = wallet.sign_transaction(transaction)
+
+        assert Account.recover_transaction(raw) == wallet.address
+
+    def test_caller_dict_is_not_modified(self, key: str) -> None:
+        """Приведение формата не меняет то, что передал вызывающий."""
+        wallet = TradingWallet(_secret(key))
+        transaction = {
+            "to": wallet.address.lower(),
+            "value": 0,
+            "gas": 21_000,
+            "maxFeePerGas": 1_000_000_000,
+            "maxPriorityFeePerGas": 0,
+            "nonce": 0,
+            "chainId": 137,
+            "data": b"",
+        }
+
+        wallet.sign_transaction(transaction)
+
+        assert transaction["to"] == wallet.address.lower()

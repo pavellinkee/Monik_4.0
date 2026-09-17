@@ -15,7 +15,11 @@ import pytest
 
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import DataError
-from monik.domain.models.execution import SwapTransaction
+from monik.domain.models.execution import (
+    AllowanceKind,
+    AllowanceRequirement,
+    SwapTransaction,
+)
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import FakeHttpClient, HttpResponse
 from monik.services.observability import FakeClock
@@ -124,7 +128,13 @@ class TestSimulation:
             data="0xdeadbeef",
             value=0,
             gas_limit=200_000,
-            spender="0x" + "22" * 20,
+            allowances=(
+                AllowanceRequirement(
+                    kind=AllowanceKind.ERC20,
+                    contract=str(f.USDT.address),
+                    spender="0x" + "22" * 20,
+                ),
+            ),
             quote=quote,
             min_output_raw=50_000_000,
         )

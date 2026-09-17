@@ -17,12 +17,44 @@ from typing import Self
 
 from pydantic import Field, model_validator
 
+from monik.domain.enums.base import DomainEnum
 from monik.domain.enums.providers import ProviderId
 from monik.domain.models.base import DomainModel
 from monik.domain.models.quote import Quote
 from monik.domain.value_objects.identity import NetworkId
 
-__all__ = ["SwapTransaction"]
+__all__ = ["AllowanceKind", "AllowanceRequirement", "SwapTransaction"]
+
+
+class AllowanceKind(DomainEnum):
+    """Каким вызовом выдаётся разрешение."""
+
+    #: Стандартный ``approve(address,uint256)`` у самого токена.
+    ERC20 = "erc20"
+    #: ``approve(address,address,uint160,uint48)`` у контракта Permit2.
+    #: Uniswap списывает токены через него, и разрешения нужны оба:
+    #: токен разрешает Permit2, Permit2 разрешает роутеру.
+    PERMIT2 = "permit2"
+
+
+class AllowanceRequirement(DomainModel):
+    """Разрешение, без которого транзакция не исполнится.
+
+    Сколько таких требований и какого они вида — особенность агрегатора.
+    KyberSwap списывает токен напрямую и требует одно разрешение; Uniswap
+    ходит через Permit2 и требует два. Общая логика этих различий не
+    знает: она просто выдаёт то, что названо.
+    """
+
+    kind: AllowanceKind
+    #: Контракт, которому адресуется вызов ``approve``.
+    contract: str = Field(min_length=42, max_length=42)
+    #: Кто получает право списывать.
+    spender: str = Field(min_length=42, max_length=42)
+
+    def describe(self) -> str:
+        """Строка для журнала и подтверждения оператором."""
+        return f"{self.kind.value}: {self.contract} → {self.spender}"
 
 
 class SwapTransaction(DomainModel):
@@ -40,8 +72,9 @@ class SwapTransaction(DomainModel):
     value: int = Field(ge=0)
     #: Предел газа, названный агрегатором.
     gas_limit: int = Field(gt=0)
-    #: Контракт, которому нужно разрешение списывать входной токен.
-    spender: str = Field(min_length=42, max_length=42)
+    #: Разрешения, без которых транзакция откатится. Порядок значим:
+    #: выдавать их нужно в том же порядке, в каком они перечислены.
+    allowances: tuple[AllowanceRequirement, ...] = Field(min_length=1)
     #: Котировка, из которой собрана транзакция. Хранится целиком: решение
     #: об отправке принимается по ней, а не по той, на которой возможность
     #: была найдена минутой раньше.

@@ -15,6 +15,7 @@ import pytest
 from monik.domain.enums.operations import OperationType
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import DataError, UnsupportedError
+from monik.domain.models.execution import AllowanceKind
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import FakeHttpClient, HttpResponse
 from monik.infrastructure.providers.contract import QuoteRequest
@@ -98,15 +99,25 @@ class TestBuildSwap:
         assert transaction.chain_id == 137
         assert transaction.min_output_raw == 49_900_000
 
-    async def test_allowance_goes_to_permit2_not_to_the_router(self) -> None:
-        """Роутер списывает токены через Permit2 — разрешение ему."""
+    async def test_allowance_is_two_step_through_permit2(self) -> None:
+        """У Uniswap разрешение двухступенчатое, и порядок шагов значим.
+
+        Токен разрешает списание контракту Permit2, а Permit2 отдельно
+        разрешает списание роутеру. Без второго шага обмен откатывается с
+        AllowanceExpired(0) — проверено живым вызовом.
+        """
         clock = FakeClock(f.NOW)
         adapter = _adapter(clock, [_ok(_quote_body()), _ok(_swap_body())])
 
         transaction = await adapter.build_swap(_request())
 
-        assert transaction.spender == endpoints.PERMIT2_ADDRESS
-        assert transaction.spender != transaction.to
+        first, second = transaction.allowances
+        assert first.kind is AllowanceKind.ERC20
+        assert first.contract == str(f.USDT.address)
+        assert first.spender == endpoints.PERMIT2_ADDRESS
+        assert second.kind is AllowanceKind.PERMIT2
+        assert second.contract == endpoints.PERMIT2_ADDRESS
+        assert second.spender == ROUTER
 
     async def test_minimum_comes_from_the_api_not_from_our_arithmetic(self) -> None:
         """Проверять будет роутер, и проверит он именно это число."""

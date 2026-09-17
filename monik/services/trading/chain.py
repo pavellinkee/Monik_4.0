@@ -30,7 +30,7 @@ from monik.services.gas.providers import RPC_RESOURCE_OWNER
 from monik.services.observability.clock import Clock
 from monik.services.resources import ResourceManager
 
-__all__ = ["ChainAccount", "SimulationResult", "TokenBalance"]
+__all__ = ["ChainAccount", "SimulationResult", "TokenBalance", "TransactionReceipt"]
 
 #: Селектор ``balanceOf(address)``.
 _BALANCE_OF = "0x70a08231"
@@ -39,6 +39,16 @@ _ALLOWANCE = "0xdd62ed3e"
 
 #: Значение «разрешено неограниченно» у ERC-20: 2**256 - 1.
 UNLIMITED_ALLOWANCE = (1 << 256) - 1
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionReceipt:
+    """Итог транзакции, попавшей в блок."""
+
+    tx_hash: str
+    succeeded: bool
+    gas_used: int
+    block_number: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +193,77 @@ class ChainAccount:
         if isinstance(outcome, _Reverted):
             return SimulationResult(succeeded=False, revert_reason=outcome.reason)
         return SimulationResult(succeeded=True)
+
+    async def nonce(self, network_id: NetworkId) -> int:
+        """Номер следующей транзакции счёта.
+
+        Берётся ``pending``, а не ``latest``: иначе вторая транзакция,
+        отправленная до включения первой в блок, получила бы тот же номер
+        и вытеснила её.
+        """
+        raw = await self._request(
+            network_id,
+            method="eth_getTransactionCount",
+            params=[self._address, "pending"],
+            dedup=f"nonce:{network_id}",
+        )
+        return _parse_uint(raw, field="eth_getTransactionCount")
+
+    async def gas_price(self, network_id: NetworkId) -> int:
+        """Текущая цена газа сети."""
+        raw = await self._request(
+            network_id, method="eth_gasPrice", params=[], dedup=f"gasprice:{network_id}"
+        )
+        return _parse_uint(raw, field="eth_gasPrice")
+
+    async def estimate_gas(self, network_id: NetworkId, *, to: str, data: str, value: int) -> int:
+        """Сколько газа потребует вызов.
+
+        Оценка делается узлом на текущем состоянии: она же служит
+        проверкой, что вызов вообще выполним.
+        """
+        raw = await self._request(
+            network_id,
+            method="eth_estimateGas",
+            params=[{"from": self._address, "to": to, "data": data, "value": hex(value)}],
+            dedup=f"estimate:{to}:{data[:18]}",
+        )
+        return _parse_uint(raw, field="eth_estimateGas")
+
+    async def send_raw(self, network_id: NetworkId, raw_transaction: bytes) -> str:
+        """Отправить подписанную транзакцию и вернуть её хеш.
+
+        Это единственное место, откуда состояние цепи меняется. Всё
+        остальное в этом модуле только читает.
+        """
+        raw = await self._request(
+            network_id,
+            method="eth_sendRawTransaction",
+            params=["0x" + raw_transaction.hex()],
+            dedup="",
+        )
+        if not isinstance(raw, str):
+            raise DataError(
+                "rpc returned no transaction hash", code="rpc_value_missing"
+            )
+        return raw
+
+    async def receipt(self, network_id: NetworkId, tx_hash: str) -> TransactionReceipt | None:
+        """Квитанция транзакции или ``None``, если она ещё не в блоке."""
+        raw = await self._request(
+            network_id,
+            method="eth_getTransactionReceipt",
+            params=[tx_hash],
+            dedup="",
+        )
+        if not isinstance(raw, dict):
+            return None
+        return TransactionReceipt(
+            tx_hash=tx_hash,
+            succeeded=_parse_uint(raw.get("status"), field="status") == 1,
+            gas_used=_parse_uint(raw.get("gasUsed"), field="gasUsed"),
+            block_number=_parse_uint(raw.get("blockNumber"), field="blockNumber"),
+        )
 
     # --- внутреннее -------------------------------------------------------
 
