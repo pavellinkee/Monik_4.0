@@ -61,8 +61,8 @@ def configuration_diagnostics(loaded: LoadedConfiguration) -> dict[str, Any]:
                 "networks": [
                     str(network.network_id)
                     for network in config.enabled_networks
-                    if (allowed := config.scanner.modes.for_mode(mode).networks) is None
-                    or network.network_id in allowed
+                    if (declared := config.scanner.modes.for_mode(mode).networks) is None
+                    or declared.get(network.network_id, False)
                 ],
                 "providers": [
                     provider.provider_id.value

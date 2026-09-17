@@ -30,6 +30,7 @@ from monik.config.sections.routes import ProviderPair, RoutePolicyConfig
 from monik.config.sections.scanner import Level1Config, Level2Config, ScannerConfig
 from monik.config.sections.scheduler import SchedulerConfig, TaskScheduleConfig
 from monik.config.sections.tokens import TokenConfig
+from monik.config.sections.trading import TradingConfig
 
 __all__ = [
     "ApplicationConfig",
@@ -64,4 +65,5 @@ __all__ = [
     "TaskScheduleConfig",
     "TelegramConfig",
     "TokenConfig",
+    "TradingConfig",
 ]

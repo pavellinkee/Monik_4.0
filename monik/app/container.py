@@ -119,6 +119,7 @@ from monik.services.registries import (
     TokenRegistry,
 )
 from monik.services.resources import ResourceLimits, ResourceManager
+from monik.services.trading import ChainAccount, TradingWallet
 from monik.services.updates import AptSystemUpdater, SystemUpdater
 
 __all__ = ["Container", "Repositories", "build_container"]
@@ -190,6 +191,10 @@ class Container:
     updater: SystemUpdater | None = None
     #: Сверка адресов токенов с сетью. Выполняется один раз при старте.
     token_check: TokenAddressCheck | None = None
+    #: Торговый счёт режима ann. ``None`` — ключ не настроен, и
+    #: подсистема исполнения собрана быть не может.
+    wallet: TradingWallet | None = None
+    chain_account: ChainAccount | None = None
 
     async def aclose(self) -> None:
         """Освободить внешние ресурсы."""
@@ -377,6 +382,22 @@ def build_container(
         tokens=tokens,
         networks=networks,
     )
+    wallet = _build_wallet(loaded)
+    chain_account = (
+        ChainAccount(
+            address=wallet.address,
+            http=http_client(),
+            resources=resources,
+            clock=clock,
+            rpc_urls={
+                str(network.network_id): url
+                for network in networks.enabled()
+                if (url := networks.rpc_url(network.network_id)) is not None
+            },
+        )
+        if wallet is not None
+        else None
+    )
     commands = _build_commands(
         loaded,
         repositories=repositories,
@@ -427,6 +448,8 @@ def build_container(
         backups=backups,
         updater=updater,
         token_check=token_check,
+        wallet=wallet,
+        chain_account=chain_account,
     )
 
 
@@ -1051,3 +1074,21 @@ class _MetricsStatsSource:
 
     def _confirmations(self, status: AmountConfirmationStatus) -> int:
         return self._metrics.counter(names.LEVEL2_CONFIRMATIONS, status=status.value)
+
+
+def _build_wallet(loaded: LoadedConfiguration) -> TradingWallet | None:
+    """Торговый счёт, если ключ настроен.
+
+    Отсутствие ключа — не ошибка: режим ``ann`` умеет работать в сухом
+    прогоне, находя сделки и не исполняя их. Ошибкой это становится
+    только при включённой торговле, и проверяется она конфигурацией.
+    """
+    reference = loaded.config.trading.private_key
+    if reference is None:
+        return None
+    if not loaded.secrets.has(reference):
+        raise ConfigurationError(
+            f"trading private key is configured as {reference.env} but the variable is not set",
+            code="trading_key_missing",
+        )
+    return TradingWallet(loaded.secrets.get(reference))

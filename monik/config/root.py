@@ -34,6 +34,7 @@ from monik.config.sections import (
     ScannerConfig,
     SchedulerConfig,
     TokenConfig,
+    TradingConfig,
 )
 from monik.domain.enums.modes import ScanMode
 from monik.domain.enums.providers import ProviderId
@@ -87,6 +88,9 @@ class Configuration(ConfigSection):
     resources: ResourceConfig = ResourceConfig()
     health: HealthConfig = HealthConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
+    #: Исполнение сделок режима ann. Отдельная подсистема со своим
+    #: выключателем (``the_main_rules.md``, правило 11).
+    trading: TradingConfig = TradingConfig()
     notifications: NotificationConfig = NotificationConfig()
     database: DatabaseConfig = DatabaseConfig()
     logging: LoggingConfig = LoggingConfig()

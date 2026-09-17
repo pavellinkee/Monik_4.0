@@ -58,10 +58,10 @@ class ScopeBuilder:
         enabled = tuple(network.network_id for network in self._networks.enabled())
         if mode is None:
             return enabled
-        allowed = self._configuration.scanner.modes.for_mode(mode).networks
-        if allowed is None:
+        declared = self._configuration.scanner.modes.for_mode(mode).networks
+        if declared is None:
             return enabled
-        return tuple(network_id for network_id in enabled if network_id in allowed)
+        return tuple(network_id for network_id in enabled if declared.get(network_id, False))
 
     def build(self, network_id: NetworkId, mode: ScanMode) -> ScanScope | None:
         """Собрать scope прохода одной сети в заданном режиме.

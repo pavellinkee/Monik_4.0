@@ -77,13 +77,17 @@ class TestScope:
 
         assert symbols == {"AAVE"}, "WETH не помечен usd_stable и в торговый проход не входит"
 
-    def test_mode_can_be_limited_to_its_own_networks(
+    def test_declared_but_switched_off_network_is_not_scanned(
         self, database: Database, clock: FakeClock
     ) -> None:
         """Торговый проход начинают в одной сети, пока остальные наблюдаются."""
         document = two_network_document()
         document["scanner"]["modes"] = {
-            "ann": {"enabled": True, "interval_seconds": 30, "networks": ["arbitrum"]}
+            "ann": {
+                "enabled": True,
+                "interval_seconds": 30,
+                "networks": {"polygon": False, "arbitrum": True},
+            }
         }
         document["scanner"]["level1"] = {"scan_timeout_seconds": 30}
         document["profitability"] = {"thresholds": {"ur": "-100", "fest": "-100", "ann": "-100"}}
@@ -103,7 +107,11 @@ class TestScope:
         document["networks"][1]["enabled"] = False
         document["tokens"] = [t for t in document["tokens"] if t["network_id"] != "arbitrum"]
         document["scanner"]["modes"] = {
-            "ann": {"enabled": True, "interval_seconds": 30, "networks": ["arbitrum"]}
+            "ann": {
+                "enabled": True,
+                "interval_seconds": 30,
+                "networks": {"polygon": True, "arbitrum": True},
+            }
         }
         document["scanner"]["level1"] = {"scan_timeout_seconds": 30}
         document["profitability"] = {"thresholds": {"ur": "-100", "fest": "-100", "ann": "-100"}}
