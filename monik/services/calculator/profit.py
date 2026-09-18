@@ -118,22 +118,22 @@ class ProfitCalculator:
 
     # --- внутреннее -------------------------------------------------------
 
-    def net_profit_with_gas(self, result: ProfitResult, *, gas_cost: Decimal) -> Decimal | None:
-        """Тот же результат, но с другой стоимостью газа.
+    @staticmethod
+    def guaranteed_round_trip_profit(
+        *, raw_input: int, raw_guaranteed_output: int, raw_costs: int
+    ) -> int:
+        """Итог круга, **который не может оказаться меньше**.
 
-        Нужен подсистеме исполнения. Поиск считает газ по оценке из
-        котировки — она бесплатна, но приблизительна. Перед самой сделкой
-        стоимость становится известна точно, и вопрос «сколько останется
-        при этой стоимости» — тот же расчёт прибыли, только с заменённым
-        слагаемым. Формула поэтому живёт здесь, а не у исполнителя
-        (``09_PROFIT_CALCULATOR.md`` §2, ``CLAUDE.md`` §25).
+        Считается не по обещанию агрегатора, а по сумме, ниже которой он
+        сам откатит обмен. Разница принципиальна: котировка — это
+        реклама, а минимум — обязательство. Решение о трате денег
+        принимается по обязательству, поэтому исполнение способно выйти
+        лучше расчёта, но не хуже.
 
-        ``None``, если исходный расчёт неполон: заменять слагаемое в
-        неизвестной сумме нечего.
+        Всё в base units базового токена: округления здесь нет и быть не
+        должно.
         """
-        if result.net_profit is None or result.costs is None:
-            return None
-        return result.net_profit + result.costs.gas_cost - gas_cost
+        return raw_guaranteed_output - raw_input - raw_costs
 
     def _invalid_reason(self, data: ProfitCalculationInput) -> str | None:
         """Причина, по которой данные противоречивы (``09_PROFIT_CALCULATOR.md`` §20).

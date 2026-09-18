@@ -106,11 +106,18 @@ def _executor(
     costs: FixedCosts | None = None,
     min_entry_profit_raw: int = 0,
     calibration: MemoryCalibration | None = None,
+    slippage_bps: int = 0,
+    rate: str = "1",
 ) -> TradeExecutor:
     clock = FakeClock(f.NOW)
     wallet = _wallet()
     return TradeExecutor(
-        adapters={ProviderId.UNISWAP.value: FakeAdapter(ProviderId.UNISWAP, clock)},
+        # Курс по умолчанию делает круг безубыточным, а допуск нулевым:
+        # проверки выбора и записи к предложению отношения не имеют, и
+        # решать их исход должен не он.
+        adapters={
+            ProviderId.UNISWAP.value: FakeAdapter(ProviderId.UNISWAP, clock, rate=Decimal(rate))
+        },
         positions=positions,
         sequences=MemorySequences(),
         account=build_account(node, clock, wallet.address),
@@ -124,7 +131,7 @@ def _executor(
         calibration=calibration,
         clock=clock,
         is_execution_open=lambda: execution_enabled,
-        slippage_bps=10,
+        slippage_bps=slippage_bps,
         min_entry_profit_raw=min_entry_profit_raw,
         receipt_timeout_seconds=1,
         receipt_poll_seconds=1,
@@ -243,24 +250,25 @@ class TestRecording:
         assert position.status is PositionStatus.BUYING
 
 
-class TestExactCost:
-    """Перед сделкой стоимость круга уточняется по собранным транзакциям.
+class TestRealOffer:
+    """Решение принимается по предложению агрегатора, а не по котировке.
 
-    Поиск оценивает газ по числу из котировки: оно приходит бесплатно, но
-    считает голый обмен по одному лучшему пути. Здесь, у единственного
-    кандидата, уже собрана настоящая транзакция покупки, и собрать вторую
-    ногу стоит один запрос. За проход таких проверок ноль или одна, тогда
-    как комбинаций двенадцать.
+    Агрегатор — обменник, а не биржа: цену он называет сам. Котировка —
+    реклама, минимум в собранной транзакции — обязательство: ниже него
+    он сам откатит обмен. Круг считается по двум таким минимумам
+    подряд, поэтому исполнение может выйти лучше расчёта, но не хуже.
     """
 
     def _node(self) -> ScriptedNode:
         return ScriptedNode(balances={USDT_ADDRESS: 60_000_000})
 
-    async def test_trade_is_skipped_when_the_exact_cost_eats_the_profit(self) -> None:
-        """Ожидали 0.1 USDT, круг стоит 0.15 — сделки не будет."""
+    async def test_trade_is_skipped_when_the_guaranteed_circle_does_not_pay(self) -> None:
+        """Круг гарантирует 0.100 USDT, а стоит 0.150 — сделки не будет."""
         positions = MemoryPositions()
         node = self._node()
-        executor = _executor(node, positions, costs=FixedCosts(150_000), min_entry_profit_raw=5_000)
+        executor = _executor(
+            node, positions, costs=FixedCosts(150_000), min_entry_profit_raw=5_000, rate="1.001"
+        )
 
         position = await executor.consider((_result(_candidate(50_000_000, "0.1")),))
 
@@ -268,30 +276,56 @@ class TestExactCost:
         assert not node.sent, "в сеть не ушло ничего"
         assert positions.items == {}
 
-    async def test_trade_proceeds_when_the_exact_cost_leaves_enough(self) -> None:
-        """Парная проверка: решает именно стоимость, а не сам кандидат."""
+    async def test_trade_proceeds_when_the_guarantee_leaves_enough(self) -> None:
+        """Парная проверка: тот же круг при дешёвом газе проходит."""
         positions = MemoryPositions()
         node = self._node()
-        executor = _executor(node, positions, costs=FixedCosts(50_000), min_entry_profit_raw=5_000)
+        executor = _executor(
+            node, positions, costs=FixedCosts(50_000), min_entry_profit_raw=5_000, rate="1.001"
+        )
 
         position = await executor.consider((_result(_candidate(50_000_000, "0.1")),))
 
         assert position is not None
         assert node.sent
 
-    async def test_unknown_exact_cost_does_not_cancel_the_trade(self) -> None:
-        """Уточнение не обязано удаваться.
+    async def test_promise_above_the_threshold_is_not_enough(self) -> None:
+        """Котировка обещает прибыль, обязательство — нет.
 
-        Поиск уже учёл газ с поправкой, и отказывать из-за недоступной
-        уточняющей проверки значило бы терять возможности на ровном месте.
+        Ровно так была открыта сделка ``#T2``: обещание прошло порог,
+        реального предложения на эту сумму не было, и выйти из позиции
+        оказалось не во что.
         """
         positions = MemoryPositions()
         node = self._node()
-        executor = _executor(node, positions, costs=FixedCosts(None), min_entry_profit_raw=5_000)
+        # Курс даёт круг ровно в ноль, а допуск в 1 % уводит
+        # обязательство заметно ниже обещания.
+        executor = _executor(
+            node,
+            positions,
+            costs=FixedCosts(0),
+            min_entry_profit_raw=0,
+            rate="1",
+            slippage_bps=100,
+        )
 
         position = await executor.consider((_result(_candidate(50_000_000, "0.1")),))
 
-        assert position is not None
+        assert position is None, "по котировке прошло бы, по обязательству — нет"
+        assert not node.sent
+
+    async def test_unknown_cost_cancels_the_trade(self) -> None:
+        """Непроверенное предложение — не предложение (``CLAUDE.md`` §12)."""
+        positions = MemoryPositions()
+        node = self._node()
+        executor = _executor(
+            node, positions, costs=FixedCosts(None), min_entry_profit_raw=5_000, rate="1.001"
+        )
+
+        position = await executor.consider((_result(_candidate(50_000_000, "0.1")),))
+
+        assert position is None
+        assert not node.sent
 
 
 class TestCalibrationRecording:

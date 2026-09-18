@@ -584,35 +584,31 @@ def test_gas_price_components_are_integers() -> None:
     assert isinstance(price.wei_per_gas, int)
 
 
-class TestRepricedGas:
-    """Замена стоимости газа — та же формула прибыли.
+class TestGuaranteedRoundTrip:
+    """Итог круга по обязательству агрегатора, а не по его обещанию.
 
-    Поиск считает газ по оценке из котировки: она бесплатна, но
-    приблизительна. Перед самой сделкой стоимость известна точно, и
-    вопрос «сколько останется при этой стоимости» обязан решаться здесь,
-    а не в подсистеме исполнения (``CLAUDE.md`` §25,
-    ``09_PROFIT_CALCULATOR.md`` §2).
+    Агрегатор — обменник, а не биржа: котировка у него реклама, а
+    минимум в собранной транзакции — обязательство, ниже которого он сам
+    откатит обмен. Решение о трате денег принимается по обязательству,
+    поэтому исполнение способно выйти лучше расчёта, но не хуже
+    (``CLAUDE.md`` §25 — формула живёт здесь).
     """
 
-    def test_exact_cost_replaces_the_estimated_one(self, calculator: ProfitCalculator) -> None:
-        # В результате фабрики газ стоил 0, а чистая прибыль — 1.50.
-        result = f.profit_result()
+    def test_profit_is_the_guarantee_minus_input_and_costs(
+        self, calculator: ProfitCalculator
+    ) -> None:
+        profit = calculator.guaranteed_round_trip_profit(
+            raw_input=50_000_000, raw_guaranteed_output=50_100_000, raw_costs=18_000
+        )
 
-        repriced = calculator.net_profit_with_gas(result, gas_cost=Decimal("0.40"))
+        assert profit == 82_000
 
-        assert repriced == Decimal("1.10")
+    def test_circle_that_does_not_cover_its_costs_is_negative(
+        self, calculator: ProfitCalculator
+    ) -> None:
+        """Выигрыш на цене меньше стоимости круга — это убыток."""
+        profit = calculator.guaranteed_round_trip_profit(
+            raw_input=50_000_000, raw_guaranteed_output=50_010_000, raw_costs=18_000
+        )
 
-    def test_repricing_is_reversible(self, calculator: ProfitCalculator) -> None:
-        """Подстановка прежней стоимости возвращает прежнюю прибыль."""
-        result = f.profit_result()
-        assert result.costs is not None
-
-        repriced = calculator.net_profit_with_gas(result, gas_cost=result.costs.gas_cost)
-
-        assert repriced == result.net_profit
-
-    def test_incomplete_result_cannot_be_repriced(self, calculator: ProfitCalculator) -> None:
-        """Заменять слагаемое в неизвестной сумме нечего."""
-        result = f.profit_result(status=CalculationStatus.UNKNOWN)
-
-        assert calculator.net_profit_with_gas(result, gas_cost=Decimal("0.40")) is None
+        assert profit == -8_000

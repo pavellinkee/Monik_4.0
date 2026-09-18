@@ -117,7 +117,12 @@ class FakeAdapter:
         — сборка — симуляция», не обращаясь к настоящему агрегатору.
         """
         quote = await self.get_quote(request)
-        minimum = quote.output_amount.raw - quote.output_amount.raw // 1000
+        # Минимум зависит от допуска проскальзывания, как у настоящего
+        # агрегатора: именно это число роутер и проверит, и именно по нему
+        # принимается решение о сделке. Подставной минимум, не зависящий
+        # от допуска, скрывал бы разницу между обещанием и обязательством.
+        bps = 10 if request.slippage_bps is None else request.slippage_bps
+        minimum = quote.output_amount.raw - quote.output_amount.raw * bps // 10_000
         return SwapTransaction(
             provider_id=self._provider_id,
             network_id=request.network_id,

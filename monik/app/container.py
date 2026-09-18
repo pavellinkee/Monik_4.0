@@ -722,8 +722,14 @@ def _price_providers(
     """Источники курса native token (решение D-4)."""
     providers: list[TokenPriceProvider] = []
     if PriceSource.AGGREGATOR_QUOTE in config.prices.sources and adapters:
-        adapter = next(iter(adapters.values()))
-        providers.append(
+        # Источник заводится на **каждый** включённый агрегатор, а не на
+        # первый попавшийся. Агрегаторы работают в разных сетях, и
+        # единственный выбранный наугад может не знать ту сеть, в которой
+        # курс понадобился: тогда стоимость газа оказывается неизвестной,
+        # а сделка — незакрываемой. Служба курсов перебирает источники по
+        # порядку и берёт первый ответивший; агрегатор, не работающий в
+        # сети, отвечает отказом сразу, без обращения к своему API.
+        providers.extend(
             AggregatorQuotePriceProvider(
                 adapter,
                 clock,
@@ -734,6 +740,7 @@ def _price_providers(
                 probe_tokens=1,
                 ttl_seconds=config.prices.freshness_seconds,
             )
+            for adapter in adapters.values()
         )
     if PriceSource.HTTP in config.prices.sources and config.prices.http_endpoint:
         providers.append(

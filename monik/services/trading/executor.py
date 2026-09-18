@@ -27,6 +27,7 @@ from monik.domain.models.execution import SwapTransaction
 from monik.domain.models.opportunity import Candidate
 from monik.domain.models.position import Position
 from monik.domain.models.token import Token
+from monik.domain.value_objects.amounts import TokenAmount
 from monik.domain.value_objects.identifiers import RequestId, TId
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.providers.contract import AggregatorAdapter, QuoteRequest
@@ -188,72 +189,84 @@ class TradeExecutor:
         reserved = await self._positions.reserved_raw_input(network_id)
         return max(balance.raw - reserved, 0)
 
-    async def _costs_allow(
+    async def _offer_allows(
         self, choice: _Choice, adapter: AggregatorAdapter, buy: SwapTransaction
     ) -> bool:
-        """Проверить находку по **точной** стоимости круга.
+        """Проверить находку по **реальному предложению**, а не по котировке.
 
-        Поиск оценивает газ по числу из котировки — оно приходит бесплатно,
-        но считает голый обмен по одному лучшему пути. Здесь, у одного
-        кандидата, уже собрана настоящая транзакция покупки, и собрать
-        вторую ногу стоит один запрос. За проход таких проверок ноль или
-        одна, тогда как комбинаций двенадцать, поэтому точность обходится
-        в сотые доли расхода на поиск.
+        Агрегатор — обменник, а не биржа: он называет цену сам и может
+        дать выгодный курс независимо от рыночной стоимости токена.
+        Поэтому решение о трате денег принимается не по обещанию
+        котировки, а по тому, что агрегатор **обязуется** отдать: по
+        минимуму, ниже которого он сам откатит обмен.
 
-        Если стоимость посчитать не удалось, сделка не отменяется: поиск
-        уже учёл газ с поправкой, и отказывать из-за недоступной уточняющей
-        проверки значило бы терять возможности на ровном месте. Об этом
-        остаётся запись в журнале.
+        Круг считается по двум таким минимумам подряд. Сначала собирается
+        покупка — её минимум и есть количество целевого токена, которое мы
+        гарантированно получим. На это количество собирается продажа, и её
+        минимум — то, что гарантированно вернётся. Если после вычета газа
+        остаётся не меньше порога, сделка возможна; иначе её нет, каким бы
+        заманчивым ни было обещание.
+
+        Обе ноги стоят по одному запросу, и делаются они у **одного**
+        кандидата, прошедшего порог: за проход таких проверок ноль или
+        одна, тогда как комбинаций двенадцать.
+
+        Если предложение получить не удалось, сделка не открывается.
+        Непроверенное предложение — не предложение (``CLAUDE.md`` §12).
         """
-        candidate = choice.candidate
-        preliminary = candidate.preliminary_result
-        sell = await self._build_exit(choice, adapter)
+        guaranteed_target = choice.target.amount_from_base_units(buy.min_output_raw)
+        sell = await self._build_exit(choice, adapter, guaranteed_target)
         if sell is None:
-            return True
+            return False
         price = await self._account.gas_price(choice.base.network_id, priority=_PRIORITY)
-        exact_raw = await self._costs.to_base_raw(
+        costs_raw = await self._costs.to_base_raw(
             choice.base.network_id,
             choice.base,
             wei=(buy.gas_limit + sell.gas_limit) * price,
         )
-        if exact_raw is None:
-            return True
-        scale = Decimal(10) ** choice.base.decimals
-        # Пересчёт делает Calculator: замена слагаемого в формуле прибыли —
-        # это та же формула, и жить она обязана там же.
-        profit = self._calculator.net_profit_with_gas(
-            preliminary, gas_cost=Decimal(exact_raw) / scale
+        if costs_raw is None:
+            _LOGGER.info(
+                "trade skipped: the cost of the circle could not be converted",
+                extra=self._describe(choice),
+            )
+            return False
+        raw_input = choice.candidate.buy_quote.input_amount.raw
+        profit_raw = self._calculator.guaranteed_round_trip_profit(
+            raw_input=raw_input,
+            raw_guaranteed_output=sell.min_output_raw,
+            raw_costs=costs_raw,
         )
-        if profit is None:
-            return True
-        profit_raw = int(profit * scale)
+        scale = Decimal(10) ** choice.base.decimals
         fields = self._describe(choice) | {
-            "quoted_gas_units": (candidate.buy_quote.estimated_gas_units or 0)
-            + (candidate.sell_quote.estimated_gas_units or 0),
+            "promised_output": str(Decimal(sell.quote.output_amount.raw) / scale),
+            "guaranteed_output": str(Decimal(sell.min_output_raw) / scale),
+            "guaranteed_target": str(guaranteed_target.as_decimal),
             "exact_gas_units": buy.gas_limit + sell.gas_limit,
             "gas_price_wei": price,
-            "expected_profit": str(Decimal(profit_raw) / scale),
+            "gas_cost": str(Decimal(costs_raw) / scale),
+            "guaranteed_profit": str(Decimal(profit_raw) / scale),
             "needed": str(Decimal(self._min_entry_profit_raw) / scale),
         }
         if profit_raw < self._min_entry_profit_raw:
             # Не открываем того, что не сможем закрыть: порог здесь тот же,
             # при котором подсистема согласна выйти из уже открытой сделки.
-            _LOGGER.info(
-                "trade skipped: the exact cost of the circle eats the profit", extra=fields
-            )
+            _LOGGER.info("trade skipped: the guaranteed circle does not pay", extra=fields)
             return False
-        _LOGGER.info("trade cost verified", extra=fields)
+        _LOGGER.info("trade offer verified", extra=fields)
         return True
 
     async def _build_exit(
-        self, choice: _Choice, adapter: AggregatorAdapter
+        self, choice: _Choice, adapter: AggregatorAdapter, amount: TokenAmount
     ) -> SwapTransaction | None:
-        """Собрать ногу продажи ради её предела газа.
+        """Собрать ногу продажи на то количество, которое мы получим.
+
+        Сумма — не обещание котировки покупки, а её гарантированный
+        минимум: продавать мы будем именно его, и предложение надо
+        спрашивать на него же.
 
         Токена на счёте ещё нет, и узел оценить вызов не смог бы — он
         откатился бы. Агрегатор же собирает транзакцию по котировке, а не
-        по остатку, и предел газа называет. Если всё-таки откажет, вернём
-        ``None``: это уточнение, а не условие сделки.
+        по остатку, и минимум с пределом газа называет.
         """
         try:
             return await adapter.build_swap(
@@ -262,16 +275,17 @@ class TradeExecutor:
                     operation=OperationType.SELL,
                     input_token=choice.target,
                     output_token=choice.base,
-                    input_amount=choice.candidate.buy_quote.output_amount,
+                    input_amount=amount,
                     request_id=RequestId.generate(),
                     slippage_bps=self._slippage_bps,
-                    priority=RequestPriority.ANN_BUY,
+                    priority=_PRIORITY,
                 )
             )
-        except Exception as error:  # noqa: BLE001 - уточнение не обязано удаваться
+        except Exception as error:  # noqa: BLE001 - отсутствие предложения не сбой
             _LOGGER.info(
-                "exact cost unavailable: the exit leg could not be built",
-                extra=log_fields(t_id="", error=type(error).__name__, detail=str(error)),
+                "trade skipped: the exit leg could not be offered",
+                extra=self._describe(choice)
+                | {"error": type(error).__name__, "detail": str(error)},
             )
             return None
 
@@ -298,7 +312,7 @@ class TradeExecutor:
                 priority=RequestPriority.ANN_BUY,
             )
         )
-        if not await self._costs_allow(choice, adapter, transaction):
+        if not await self._offer_allows(choice, adapter, transaction):
             return None
         simulation = await self._account.simulate(transaction, priority=_PRIORITY)
         if not simulation.succeeded:

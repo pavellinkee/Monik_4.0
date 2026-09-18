@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 
 from eth_account import Account
 
@@ -78,6 +79,7 @@ def _watcher(
     min_exit_profit_waiting_raw: int | None = None,
     costs: FixedCosts | None = None,
     calibration: MemoryCalibration | None = None,
+    slippage_bps: int = 0,
     sell_rate: str = "10.00",
     long_wait_enabled: bool = True,
     long_wait_seconds: int = 7_200,
@@ -100,7 +102,7 @@ def _watcher(
         calibration=calibration,
         clock=active,
         is_execution_open=lambda: True,
-        slippage_bps=10,
+        slippage_bps=slippage_bps,
         min_entry_profit_raw=0,
         receipt_timeout_seconds=1,
         receipt_poll_seconds=1,
@@ -120,7 +122,11 @@ def _watcher(
             if min_exit_profit_waiting_raw is None
             else min_exit_profit_waiting_raw
         ),
-        slippage_bps=10,
+        # Допуск по умолчанию нулевой: большинство проверок здесь о
+        # порогах и газе, и разница между обещанием и обязательством
+        # решать их исход не должна. Там, где она и проверяется, допуск
+        # задаётся явно.
+        slippage_bps=slippage_bps,
         long_wait_enabled=long_wait_enabled,
         long_wait_seconds=long_wait_seconds,
         receipt_timeout_seconds=1,
@@ -569,3 +575,54 @@ class TestSellCalibration:
         assert calibration.records == [
             (str(f.POLYGON), "uniswap", position.sell_quoted_gas_units, 180_000)
         ]
+
+
+class TestRealOffer:
+    """Выход решается по предложению агрегатора, а не по котировке.
+
+    Котировка — реклама, минимум в собранной транзакции —
+    обязательство: ниже него агрегатор сам откатит обмен. Разница между
+    ними — допуск проскальзывания, и для стратегии, зарабатывающей сотые
+    доли процента, он способен превышать всю прибыль многократно.
+    """
+
+    async def test_promise_above_the_target_is_not_enough(self) -> None:
+        """5 AAVE по курсу 10.1 обещают 50.5 при допуске в 1 %.
+
+        Обязательство при этом — 49.995, то есть круг в минусе. Продавать
+        по обещанию значило бы согласиться получить меньше, чем нужно.
+        """
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate="10.1", slippage_bps=100)
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert not node.sent, "по котировке прошло бы, по обязательству — нет"
+        assert positions.items["#T2" if "#T2" in positions.items else "#T1"].status is (
+            PositionStatus.HOLDING
+        )
+
+    async def test_guarantee_above_the_target_sells(self) -> None:
+        """Парная проверка: при узком допуске тот же круг проходит."""
+        node = ScriptedNode()
+        positions = MemoryPositions()
+        watcher = _watcher(node, positions, sell_rate="10.1", slippage_bps=1)
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert node.sent, "обязательство покрывает и газ, и цель"
+        assert positions.items["#T1"].status is PositionStatus.CLOSED
+
+    async def test_slippage_room_is_measured_against_the_target(self) -> None:
+        """Наглядно: допуск в 0.1 % на 50 USDT — это 0.05 USDT.
+
+        Порог выхода при этом 0.005. Допуск больше цели в десять раз,
+        поэтому решение по котировке ничего не гарантирует.
+        """
+        acquired = Decimal(ACQUIRED).scaleb(-18) * Decimal("10.1")
+        room = acquired * Decimal("0.001")
+
+        assert room > Decimal("0.005") * 10

@@ -268,12 +268,16 @@ class PositionWatcher:
     async def _consider_exit(self, position: Position, *, immediate: bool) -> LongWaitNotice | None:
         """Проверить, выгодно ли продавать сейчас.
 
+        Решение принимается по **реальному предложению** агрегатора, а
+        не по котировке: по сумме, ниже которой он сам откатит обмен.
+        Агрегатор — обменник, а не биржа, и обязательство у него своё,
+        не равное рекламе.
+
         Порядок шагов выбран так, чтобы не тратить запросов впустую.
-        Сначала берётся котировка — без неё решать нечего. Разница
-        токенов сравнивается с порогом **до** сборки транзакции: круг,
-        не окупающий себя даже без газа, с газом тем более убыточен, и
-        собирать вызов роутера ради этого незачем. Точная стоимость
-        считается только у круга, у которого есть шанс.
+        Сначала берётся котировка — она служит дешёвым отсевом, потому
+        что обязательство её не превышает: круг, не окупающийся даже по
+        обещанию, не окупится и по минимуму. Транзакция собирается
+        только у круга, у которого есть шанс.
         """
         if position.raw_acquired is None:
             return None
@@ -281,6 +285,7 @@ class PositionWatcher:
         if adapter is None:
             return None
         needed = self._min_exit_profit_raw if immediate else self._min_exit_profit_waiting_raw
+        decimals = position.base_token.decimals
         request = QuoteRequest(
             network_id=position.network_id,
             operation=OperationType.SELL,
@@ -295,6 +300,9 @@ class PositionWatcher:
             priority=_PRIORITY,
         )
         quote = await adapter.get_quote(request)
+        # Котировка служит дешёвым отсевом: обязательство агрегатора её не
+        # превышает, поэтому круг, не окупающийся даже по обещанию, не
+        # окупится и по минимуму — собирать ради него транзакцию незачем.
         gross = position.profit_if_sold_for(quote.output_amount.raw)
         if gross < needed:
             return self._wait(position, profit=gross, needed=needed, costs=None)
@@ -305,9 +313,24 @@ class PositionWatcher:
             # Стоимость круга неизвестна. Продавать вслепую нельзя:
             # неизвестный расход нулём не считается (``CLAUDE.md`` §12).
             return self._wait(position, profit=gross, needed=needed, costs=None)
-        profit = position.profit_if_sold_for(quote.output_amount.raw, raw_costs=costs)
+        # Решение принимается по тому, что агрегатор **обязуется** отдать,
+        # а не по тому, что обещает. Котировка — реклама, минимум —
+        # обязательство: ниже него обмен откатится он сам. Значит
+        # исполнение может выйти лучше расчёта, но не хуже.
+        profit = position.profit_if_sold_for(transaction.min_output_raw, raw_costs=costs)
         if profit < needed:
             return self._wait(position, profit=profit, needed=needed, costs=costs)
+        _LOGGER.info(
+            "exit offer verified",
+            extra=log_fields(
+                t_id=str(position.t_id),
+                promised=str(Decimal(quote.output_amount.raw).scaleb(-decimals)),
+                guaranteed=str(Decimal(transaction.min_output_raw).scaleb(-decimals)),
+                profit=str(Decimal(profit).scaleb(-decimals)),
+                needed=str(Decimal(needed).scaleb(-decimals)),
+                gas=str(Decimal(costs).scaleb(-decimals)),
+            ),
+        )
         await self._sell(
             position.model_copy(update={"sell_quoted_gas_units": quote.estimated_gas_units}),
             transaction,
