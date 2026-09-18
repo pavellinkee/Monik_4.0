@@ -19,7 +19,10 @@ native token, и запрашивать ничего не нужно.
   сравниваются в токенах, как и прежде;
 * при нехватке любого из слагаемых возвращается ``None``, и работает
   обычный источник курса — подставлять приблизительное значение вместо
-  точного запрещено (``CLAUDE.md`` §12).
+  точного запрещено (``CLAUDE.md`` §12);
+* долларовая стоимость берётся по **всем** ногам круга: стоимость в
+  native token относится к кругу целиком, и делить её на стоимость одной
+  ноги значит получить не курс, а его долю.
 """
 
 from __future__ import annotations
@@ -64,7 +67,7 @@ def gas_rate_from_quotes(
         return None
     if gas.native_token is None or gas.cost_native is None or gas.cost_native <= Decimal(0):
         return None
-    cost_usd = _first_cost_usd(quotes)
+    cost_usd = _total_cost_usd(quotes)
     if cost_usd is None or cost_usd <= Decimal(0):
         return None
     if units_correction <= Decimal(0):
@@ -79,13 +82,21 @@ def gas_rate_from_quotes(
     )
 
 
-def _first_cost_usd(quotes: tuple[Quote, ...]) -> Decimal | None:
-    """Первая сообщённая долларовая стоимость исполнения.
+def _total_cost_usd(quotes: tuple[Quote, ...]) -> Decimal | None:
+    """Долларовая стоимость исполнения **всех** переданных ног.
 
-    Стоимость относится к сети, а не к провайдеру, поэтому достаточно,
-    чтобы её сообщил хотя бы один из них.
+    Суммируется, а не берётся у первой попавшейся. Стоимость в native
+    token относится к кругу целиком, и делить её на стоимость одной ноги
+    значит получить не курс, а половину курса — с ошибкой ровно во
+    столько раз, сколько ног в круге.
+
+    Если хотя бы одна нога цены не назвала, сумма неизвестна: достраивать
+    её по второй ноге нельзя, ноги обходятся по-разному
+    (``CLAUDE.md`` §12).
     """
+    total = Decimal(0)
     for quote in quotes:
-        if quote.estimated_gas_cost_usd is not None:
-            return Decimal(quote.estimated_gas_cost_usd)
-    return None
+        if quote.estimated_gas_cost_usd is None:
+            return None
+        total += Decimal(quote.estimated_gas_cost_usd)
+    return total or None

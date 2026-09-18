@@ -54,12 +54,36 @@ class TestDerivedRate:
         assert rate.source == SOURCE
         assert rate.to_token == f.USDT_STABLE.key
 
-    def test_any_leg_may_report_the_cost(self) -> None:
-        """Стоимость относится к сети, а не к провайдеру."""
+    def test_cost_of_every_leg_is_added_up(self) -> None:
+        """Стоимость в native token относится к кругу целиком.
+
+        Делить её на цену одной ноги — значит получить не курс, а его
+        долю, с ошибкой ровно во столько раз, сколько ног в круге.
+        Раньше бралась первая нога, сообщившая цену, и курс выходил
+        вдвое ниже настоящего.
+        """
         rate = gas_rate_from_quotes(
-            _gas("0.01"), (_quote(None), _quote("0.005")), target=f.USDT_STABLE, now=f.NOW
+            _gas("0.01"),
+            (_quote("0.003"), _quote("0.002")),
+            target=f.USDT_STABLE,
+            now=f.NOW,
         )
+
         assert rate is not None
+        assert rate.rate == Decimal("0.5"), "0.005 доллара за 0.01 native token"
+
+    def test_leg_without_a_price_makes_the_sum_unknown(self) -> None:
+        """Достраивать цену второй ноги по первой нельзя.
+
+        Ноги обходятся по-разному: у одной маршрут простой, у другой
+        может разойтись на несколько пулов.
+        """
+        assert (
+            gas_rate_from_quotes(
+                _gas("0.01"), (_quote(None), _quote("0.005")), target=f.USDT_STABLE, now=f.NOW
+            )
+            is None
+        )
 
 
 class TestRefusals:
