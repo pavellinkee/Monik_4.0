@@ -3,8 +3,20 @@
 ⚠️ **API contract NOT verified against live endpoint** (решение D-3).
 
 Velora использует двухшаговую модель ``/prices`` → ``/transactions``.
-Monik не исполняет свопы (``01_PROJECT_REQUIREMENTS.md`` §55), поэтому
-адаптер использует только ``/prices`` и нормализует ``priceRoute``.
+Второй шаг нужен режиму ``ann``, который сделки исполняет
+(``the_main_rules.md``, правило 11).
+
+Особенности провайдера, переведённые здесь в общие понятия:
+
+* **минимум задаём мы сами.** Uniswap называет его полем
+  ``minimumAmount``, KyberSwap выводит из допуска, а Velora принимает
+  его параметром ``destAmount`` при сборке: сколько назвали, ниже того
+  роутер и не отдаст. Это самая честная форма из трёх — обязательство
+  не выводится и не угадывается, а задаётся;
+* списание идёт через отдельный контракт ``tokenTransferProxy``, а не
+  через сам роутер: разрешение выдаётся ему, и адрес приходит в ответе
+  вместе с маршрутом;
+* расход газа приходит в маршруте полем ``gasCost``.
 """
 
 from __future__ import annotations
@@ -22,6 +34,7 @@ from monik.domain.enums.operations import (
 )
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import DataError, MonikError, UnsupportedError
+from monik.domain.models.execution import AllowanceKind, AllowanceRequirement, SwapTransaction
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
 from monik.domain.models.route import Route, RouteStep
@@ -49,6 +62,11 @@ from monik.services.resources import ResourceManager
 __all__ = ["VeloraAdapter"]
 
 _PROVIDER = ProviderId.VELORA
+
+#: Адрес счёта, от имени которого собирается транзакция. Опция
+#: провайдера: котировка и calldata строятся под конкретного
+#: отправителя, и подставлять произвольный адрес нельзя.
+OPTION_SWAPPER = "swapper"
 
 #: ``priceRoute`` возвращается ответом и передаётся в ``/transactions``
 #: как есть. Для проверки Level 2 адаптер сравнивает отпечатки маршрута:
@@ -119,6 +137,7 @@ class VeloraAdapter(HttpProviderAdapter):
             supports_fixed_route=_SUPPORTS_FIXED_ROUTE,
             supports_fee_discovery=False,
             supports_gas_estimate=True,
+            supports_execution=True,
         )
 
     @property
@@ -152,6 +171,66 @@ class VeloraAdapter(HttpProviderAdapter):
         )
         with normalized_response(_PROVIDER):
             return self._to_quote(request, payload)
+
+    async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
+        """Собрать вызов роутера по свежему маршруту.
+
+        Два обращения: ``/prices`` находит маршрут, ``/transactions``
+        превращает его в calldata. Маршрут передаётся целиком и без
+        изменений — провайдер подписывает его полем ``hmac``.
+
+        Котировка берётся заново, а не переиспользуется: транзакция
+        отправляется по свежей цене, а не по той, на которой возможность
+        была найдена минутой раньше.
+        """
+        if request.slippage_bps is None:
+            raise DataError(
+                "velora swap requires an explicit slippage tolerance: "
+                "without it the guaranteed minimum is unknown",
+                code="slippage_missing",
+                provider_code=_PROVIDER.value,
+            )
+        network = self._require_network(request.network_id)
+        payload = await self.request_json(
+            path=endpoints.PRICES_PATH,
+            network_id=request.network_id,
+            operation=self._capability_operation(request),
+            request_id=request.request_id,
+            params=self._price_params(request, network),
+            priority=request.priority,
+            correlation_id=request.correlation_id,
+            timeout=request.timeout,
+            priority_at=request.priority_at,
+        )
+        with normalized_response(_PROVIDER):
+            quote = self._to_quote(request, payload)
+            price_route = self._price_route(payload)
+        minimum = max(quote.output_amount.raw * (10_000 - request.slippage_bps) // 10_000, 1)
+        built = await self.request_json(
+            path=endpoints.transactions_path(network),
+            network_id=request.network_id,
+            operation=self._capability_operation(request),
+            request_id=RequestId.generate(),
+            method="POST",
+            json_body={
+                "srcToken": str(request.input_token.address),
+                "destToken": str(request.output_token.address),
+                "srcDecimals": request.input_token.decimals,
+                "destDecimals": request.output_token.decimals,
+                "srcAmount": str(request.input_amount.raw),
+                # Минимум задаётся нами и становится обязательством
+                # роутера: ниже него обмен не исполнится.
+                "destAmount": str(minimum),
+                "priceRoute": price_route,
+                "userAddress": self._require_swapper(),
+            },
+            priority=request.priority,
+            correlation_id=request.correlation_id,
+            timeout=request.timeout,
+            priority_at=request.priority_at,
+        )
+        with normalized_response(_PROVIDER):
+            return self._to_swap(request, quote, price_route, built, minimum)
 
     async def validate_fixed_route(self, request: QuoteRequest) -> RouteValidation:
         """Сравнить свежий маршрут с зафиксированным Level 1."""
@@ -273,6 +352,75 @@ class VeloraAdapter(HttpProviderAdapter):
         return self.redact_provider_text(" ".join(parts))[:_ERROR_DETAIL_LIMIT]
 
     # --- построение запроса ----------------------------------------------
+
+    @staticmethod
+    def _price_route(payload: Any) -> dict[str, Any]:
+        """Маршрут из ответа ``/prices``, целиком и без изменений."""
+        route = require_field(payload, "priceRoute", provider=_PROVIDER)
+        if not isinstance(route, dict):
+            raise DataError(
+                "velora priceRoute is not a JSON object",
+                code="provider_response_malformed",
+                provider_code=_PROVIDER.value,
+            )
+        return route
+
+    def _to_swap(
+        self,
+        request: QuoteRequest,
+        quote: Quote,
+        price_route: dict[str, Any],
+        built: Any,
+        minimum: int,
+    ) -> SwapTransaction:
+        """Преобразовать ответ ``/transactions`` в транзакцию."""
+        if not isinstance(built, dict):
+            raise DataError(
+                "velora transaction response is not a JSON object",
+                code="provider_response_malformed",
+                provider_code=_PROVIDER.value,
+            )
+        return SwapTransaction(
+            provider_id=_PROVIDER,
+            network_id=request.network_id,
+            chain_id=self._require_network(request.network_id),
+            to=str(require_field(built, "to", provider=_PROVIDER)),
+            data=str(require_field(built, "data", provider=_PROVIDER)),
+            value=parse_base_units(built.get("value", "0"), provider=_PROVIDER, field="value"),
+            # Предел газа приходит маршрутом: ответ сборки его не несёт,
+            # потому что проверка на стороне провайдера отключена.
+            gas_limit=parse_base_units(
+                require_field(price_route, "gasCost", provider=_PROVIDER),
+                provider=_PROVIDER,
+                field="gasCost",
+            ),
+            # Списывает не роутер, а отдельный контракт-посредник, и
+            # разрешение выдаётся ему. Адрес приходит вместе с маршрутом:
+            # угадывать его нельзя, он меняется вместе с версией роутера.
+            allowances=(
+                AllowanceRequirement(
+                    kind=AllowanceKind.ERC20,
+                    contract=str(request.input_token.address),
+                    spender=str(
+                        require_field(price_route, "tokenTransferProxy", provider=_PROVIDER)
+                    ),
+                ),
+            ),
+            quote=quote,
+            min_output_raw=minimum,
+        )
+
+    def _require_swapper(self) -> str:
+        """Адрес, от имени которого собирается транзакция."""
+        swapper = self._config.option(OPTION_SWAPPER)
+        if swapper is None:
+            raise UnsupportedError(
+                "velora swap requires the trading account address in "
+                "providers[velora].options.swapper",
+                code="provider_swapper_missing",
+                provider_code=_PROVIDER.value,
+            )
+        return swapper
 
     @staticmethod
     def _price_params(request: QuoteRequest, network: int) -> dict[str, str]:

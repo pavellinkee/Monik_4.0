@@ -19,6 +19,7 @@ __all__ = [
     "API_VERSION",
     "DEFAULT_BASE_URL",
     "PRICES_PATH",
+    "transactions_path",
     "SUPPORTED_NETWORK_IDS",
     "TOKENS_PATH",
     "network_id_for",
@@ -46,6 +47,22 @@ SUPPORTED_NETWORK_IDS: dict[str, int] = {
 def network_id_for(network_id: NetworkId) -> int | None:
     """Сетевой идентификатор Velora или ``None``, если сеть не заявлена."""
     return SUPPORTED_NETWORK_IDS.get(str(network_id))
+
+
+def transactions_path(network: int) -> str:
+    """Путь сборки транзакции по уже полученному маршруту.
+
+    Маршрут возвращается из :data:`PRICES_PATH` и передаётся сюда целиком:
+    провайдер подписывает его полем ``hmac``, и правка любого поля делает
+    маршрут негодным.
+
+    ``ignoreChecks`` снимает проверку разрешения и остатка на стороне
+    провайдера. Она нам не нужна и вредна: проверять деньги — дело
+    Monik, он делает это точнее (симуляцией на текущем состоянии цепи), а
+    отказ провайдера на этапе сборки лишил бы нас и транзакции, и
+    возможности эту проверку провести.
+    """
+    return f"/transactions/{network}?ignoreChecks=true"
 
 
 def tokens_path(network: int) -> str:
