@@ -32,6 +32,7 @@ from monik.services.gas.providers import RPC_RESOURCE_OWNER
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.resources import ResourceManager
+from monik.services.rpc import RpcEndpoints, call_with_failover
 
 __all__ = ["OnchainTokenMetadata", "TokenMetadata"]
 
@@ -63,18 +64,18 @@ class OnchainTokenMetadata:
         http: HttpClient,
         resources: ResourceManager,
         clock: Clock,
-        rpc_urls: dict[str, str],
+        rpc_urls: dict[str, tuple[str, ...]],
         timeout_seconds: float = 5.0,
     ) -> None:
         self._http = http
         self._resources = resources
         self._clock = clock
-        self._rpc_urls = dict(rpc_urls)
+        self._endpoints = RpcEndpoints(rpc_urls)
         self._timeout = timedelta(seconds=timeout_seconds)
 
     def supports(self, network_id: NetworkId) -> bool:
         """Есть ли у сети узел, которому можно задать вопрос."""
-        return str(network_id) in self._rpc_urls
+        return self._endpoints.supports(network_id)
 
     async def metadata(self, network_id: NetworkId, address: TokenAddress) -> TokenMetadata | None:
         """Свойства контракта или ``None``, если это не токен.
@@ -83,19 +84,16 @@ class OnchainTokenMetadata:
         ERC-20». Сетевой сбой к такому выводу не приводит: он выпускается
         наружу ошибкой, и проверка сама решает, что с ним делать.
         """
-        url = self._rpc_urls.get(str(network_id))
-        if url is None:
+        if not self._endpoints.supports(network_id):
             return None
-        raw_decimals = await self._call(url, network_id, address, _DECIMALS_SELECTOR)
+        raw_decimals = await self._call(network_id, address, _DECIMALS_SELECTOR)
         decimals = _parse_decimals(raw_decimals)
         if decimals is None:
             return None
-        raw_symbol = await self._call(url, network_id, address, _SYMBOL_SELECTOR)
+        raw_symbol = await self._call(network_id, address, _SYMBOL_SELECTOR)
         return TokenMetadata(decimals=decimals, symbol=_parse_symbol(raw_symbol))
 
-    async def _call(
-        self, url: str, network_id: NetworkId, address: TokenAddress, selector: str
-    ) -> Any:
+    async def _call(self, network_id: NetworkId, address: TokenAddress, selector: str) -> Any:
         """Выполнить ``eth_call`` через Resource Manager."""
         request_id = RequestId.generate()
         resource_request = ResourceRequest(
@@ -112,7 +110,7 @@ class OnchainTokenMetadata:
             deduplication_key=f"rpc:{network_id}:{address}:{selector}",
         )
 
-        async def call() -> Any:
+        async def ask(url: str) -> Any:
             response = await self._http.send(
                 HttpRequest(
                     method="POST",
@@ -140,6 +138,17 @@ class OnchainTokenMetadata:
                 )
                 return None
             return body.get("result")
+
+        async def call() -> Any:
+            # Перебор узлов внутри одного обращения к Resource Manager:
+            # для вызывающей стороны это один запрос, им и должен
+            # считаться для ограничения частоты и предохранителя.
+            return await call_with_failover(
+                self._endpoints.for_network(network_id),
+                ask,
+                network_id=network_id,
+                method="eth_call",
+            )
 
         try:
             return await self._resources.execute(resource_request, call)

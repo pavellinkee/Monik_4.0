@@ -35,6 +35,13 @@ class NetworkConfig(ConfigSection):
     #: круг от чужого контракта.
     base_token_address: TokenAddress
     rpc_url: str | None = Field(default=None, max_length=512)
+    #: Запасные узлы, в порядке обращения. Основной — :attr:`rpc_url`.
+    #:
+    #: Узел — внешняя служба, и публичные узлы отказывают. Пока адрес
+    #: один, такой отказ останавливает всё, что зависит от цепи, включая
+    #: подбор квитанции уже отправленной покупки: деньги потрачены, а
+    #: узнать их судьбу нечем.
+    rpc_fallback_urls: tuple[str, ...] = ()
     #: Значок сети в уведомлении. Свойство сети, а не формата сообщения.
     emoji: str | None = Field(default=None, min_length=1, max_length=8)
     enabled: bool = True
@@ -54,9 +61,24 @@ class NetworkConfig(ConfigSection):
     #: транзакцию — это видно; завышенная молча потратит деньги.
     priority_fee_wei: int = Field(default=0, ge=0, le=10**13)
 
+    @property
+    def rpc_endpoints(self) -> tuple[str, ...]:
+        """Узлы сети в порядке обращения: основной первым."""
+        if self.rpc_url is None:
+            return ()
+        return (self.rpc_url, *self.rpc_fallback_urls)
+
     @model_validator(mode="after")
     def _validate_rpc(self) -> Self:
         """RPC endpoint обязан использовать HTTPS (``32_SECURITY.md``)."""
-        if self.rpc_url is not None and not self.rpc_url.startswith("https://"):
-            raise ValueError("rpc_url must use https")
+        for url in (self.rpc_url, *self.rpc_fallback_urls):
+            if url is not None and not url.startswith("https://"):
+                raise ValueError("rpc_url must use https")
+        if self.rpc_fallback_urls and self.rpc_url is None:
+            raise ValueError(
+                "rpc_fallback_urls are configured without rpc_url: a fallback without a "
+                "primary endpoint is a typo, not a configuration"
+            )
+        if len(set(self.rpc_endpoints)) != len(self.rpc_endpoints):
+            raise ValueError("rpc endpoints must be unique: a repeated address is not a fallback")
         return self

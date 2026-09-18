@@ -42,7 +42,7 @@ def _account(clock: FakeClock, responses: list[HttpResponse]) -> ChainAccount:
         http=FakeHttpClient(responses),
         resources=resource_manager(clock),
         clock=clock,
-        rpc_urls={str(f.POLYGON): "https://polygon-rpc.example"},
+        rpc_urls={str(f.POLYGON): ("https://polygon-rpc.example",)},
     )
 
 
@@ -177,7 +177,7 @@ class TestSimulation:
             http=http,
             resources=resource_manager(clock),
             clock=clock,
-            rpc_urls={str(f.POLYGON): "https://polygon-rpc.example"},
+            rpc_urls={str(f.POLYGON): ("https://polygon-rpc.example",)},
         )
 
         await account.simulate(self._transaction())
@@ -219,7 +219,7 @@ class TestWaiting:
             http=http,
             resources=resource_manager(clock),
             clock=clock,
-            rpc_urls={str(f.POLYGON): "https://rpc.example"},
+            rpc_urls={str(f.POLYGON): ("https://rpc.example",)},
         )
         sender = TransactionSender(
             wallet=wallet,
@@ -260,7 +260,7 @@ class TestPriority:
             http=FakeHttpClient(handler=node),
             resources=recorder,  # type: ignore[arg-type]
             clock=clock,
-            rpc_urls={str(f.POLYGON): RPC_URL},
+            rpc_urls={str(f.POLYGON): (RPC_URL,)},
         )
 
     async def test_the_caller_chooses_the_priority(self) -> None:
@@ -300,7 +300,7 @@ class TestNetworkPriorityFee:
             http=FakeHttpClient(handler=node),
             resources=resource_manager(clock),
             clock=clock,
-            rpc_urls={str(f.POLYGON): RPC_URL},
+            rpc_urls={str(f.POLYGON): (RPC_URL,)},
         )
         sender = TransactionSender(
             wallet=wallet,
@@ -326,7 +326,7 @@ class TestNetworkPriorityFee:
             http=FakeHttpClient(handler=node),
             resources=resource_manager(clock),
             clock=clock,
-            rpc_urls={str(f.POLYGON): RPC_URL},
+            rpc_urls={str(f.POLYGON): (RPC_URL,)},
         )
         sender = TransactionSender(
             wallet=wallet,

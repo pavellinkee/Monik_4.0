@@ -20,6 +20,7 @@ from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import HttpClient, HttpRequest, classify_response
 from monik.services.observability.clock import Clock
 from monik.services.resources import ResourceManager
+from monik.services.rpc import RpcEndpoints, call_with_failover
 
 __all__ = [
     "RPC_RESOURCE_OWNER",
@@ -95,7 +96,7 @@ class RpcGasPriceProvider:
         http: HttpClient,
         resources: ResourceManager,
         clock: Clock,
-        rpc_urls: dict[str, str],
+        rpc_urls: dict[str, tuple[str, ...]],
         freshness_seconds: int,
         priority_fees_wei: dict[str, int] | None = None,
         timeout_seconds: float = 5.0,
@@ -103,7 +104,7 @@ class RpcGasPriceProvider:
         self._http = http
         self._resources = resources
         self._clock = clock
-        self._rpc_urls = dict(rpc_urls)
+        self._endpoints = RpcEndpoints(rpc_urls)
         self._freshness = timedelta(seconds=freshness_seconds)
         #: Надбавка по сетям: свойство сети, а не приложения.
         self._priority_fees_wei = dict(priority_fees_wei or {})
@@ -111,14 +112,13 @@ class RpcGasPriceProvider:
 
     async def gas_price(self, network_id: NetworkId) -> GasPrice | None:
         """Запросить цену газа у RPC."""
-        url = self._rpc_urls.get(str(network_id))
-        if url is None:
+        if not self._endpoints.supports(network_id):
             return None
-        payload = await self._call(url, network_id, "eth_gasPrice")
+        payload = await self._call(network_id, "eth_gasPrice")
         legacy = self._parse_quantity(payload, field="eth_gasPrice")
         if legacy is None:
             return None
-        base_fee = await self._base_fee(url, network_id)
+        base_fee = await self._base_fee(network_id)
         now = self._clock.now()
         if base_fee is None:
             return GasPrice(
@@ -139,9 +139,9 @@ class RpcGasPriceProvider:
             expires_at=now + self._freshness,
         )
 
-    async def _base_fee(self, url: str, network_id: NetworkId) -> int | None:
+    async def _base_fee(self, network_id: NetworkId) -> int | None:
         """Base fee последнего блока, если сеть поддерживает EIP-1559."""
-        payload = await self._call(url, network_id, "eth_feeHistory", ["0x1", "latest", []])
+        payload = await self._call(network_id, "eth_feeHistory", ["0x1", "latest", []])
         if not isinstance(payload, dict):
             return None
         base_fees = payload.get("baseFeePerGas")
@@ -151,7 +151,6 @@ class RpcGasPriceProvider:
 
     async def _call(
         self,
-        url: str,
         network_id: NetworkId,
         method: str,
         params: list[Any] | None = None,
@@ -174,7 +173,7 @@ class RpcGasPriceProvider:
             deduplication_key=f"rpc:{network_id}:{method}",
         )
 
-        async def call() -> Any:
+        async def ask(url: str) -> Any:
             response = await self._http.send(
                 HttpRequest(
                     method="POST",
@@ -194,6 +193,17 @@ class RpcGasPriceProvider:
             if not isinstance(body, dict):
                 raise DataError("rpc response is not a JSON object", code="rpc_response_malformed")
             return body.get("result")
+
+        async def call() -> Any:
+            # Перебор узлов внутри одного обращения к Resource Manager:
+            # для вызывающей стороны это один запрос, им и должен
+            # считаться для ограничения частоты и предохранителя.
+            return await call_with_failover(
+                self._endpoints.for_network(network_id),
+                ask,
+                network_id=network_id,
+                method=method,
+            )
 
         return await self._resources.execute(resource_request, call)
 

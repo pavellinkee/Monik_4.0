@@ -35,6 +35,7 @@ from monik.infrastructure.http import HttpClient, HttpRequest, classify_response
 from monik.services.gas.providers import RPC_RESOURCE_OWNER
 from monik.services.observability.clock import Clock
 from monik.services.resources import ResourceManager
+from monik.services.rpc import RpcEndpoints, call_with_failover
 
 __all__ = ["ChainAccount", "SimulationResult", "TokenBalance", "TransactionReceipt"]
 
@@ -126,7 +127,7 @@ class ChainAccount:
         http: HttpClient,
         resources: ResourceManager,
         clock: Clock,
-        rpc_urls: dict[str, str],
+        rpc_urls: dict[str, tuple[str, ...]],
         timeout_seconds: float = 5.0,
         default_priority: RequestPriority = RequestPriority.ANN_BUY,
     ) -> None:
@@ -134,7 +135,9 @@ class ChainAccount:
         self._http = http
         self._resources = resources
         self._clock = clock
-        self._rpc_urls = dict(rpc_urls)
+        #: Узлы сетей в порядке обращения: отказ одного не должен
+        #: останавливать работу с деньгами.
+        self._endpoints = RpcEndpoints(rpc_urls)
         self._timeout = timedelta(seconds=timeout_seconds)
         #: Приоритет вызовов, которым его не назвали явно. Покупка — не
         #: самый высокий из возможных: продажа обгоняет и её.
@@ -147,7 +150,7 @@ class ChainAccount:
 
     def supports(self, network_id: NetworkId) -> bool:
         """Есть ли у сети узел, которому можно задать вопрос."""
-        return str(network_id) in self._rpc_urls
+        return self._endpoints.supports(network_id)
 
     async def token_balance(
         self, token: Token, *, priority: RequestPriority | None = None
@@ -204,8 +207,7 @@ class ChainAccount:
         бы. Именно этим завышенная котировка и оборачивается — потерей
         газа вместо исполнения по плохому курсу.
         """
-        url = self._rpc_urls.get(str(transaction.network_id))
-        if url is None:
+        if not self._endpoints.supports(transaction.network_id):
             raise DataError(
                 f"network {transaction.network_id} has no rpc endpoint configured",
                 code="rpc_endpoint_missing",
@@ -367,8 +369,8 @@ class ChainAccount:
         allow_revert: bool = False,
         priority: RequestPriority | None = None,
     ) -> Any:
-        url = self._rpc_urls.get(str(network_id))
-        if url is None:
+        endpoints = self._endpoints.for_network(network_id)
+        if not endpoints:
             raise DataError(
                 f"network {network_id} has no rpc endpoint configured",
                 code="rpc_endpoint_missing",
@@ -388,7 +390,7 @@ class ChainAccount:
             deduplication_key=f"rpc:{network_id}:{dedup}",
         )
 
-        async def call() -> Any:
+        async def ask(url: str) -> Any:
             response = await self._http.send(
                 HttpRequest(
                     method="POST",
@@ -415,6 +417,12 @@ class ChainAccount:
                     code="rpc_call_failed",
                 )
             return body.get("result")
+
+        async def call() -> Any:
+            # Перебор узлов идёт внутри одного обращения к Resource
+            # Manager: ограничение частоты и предохранитель считают это
+            # одним запросом, каким оно для вызывающей стороны и является.
+            return await call_with_failover(endpoints, ask, network_id=network_id, method=method)
 
         return await self._resources.execute(resource_request, call)
 

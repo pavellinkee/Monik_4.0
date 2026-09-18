@@ -31,7 +31,9 @@ class NetworkRegistry:
             )
             for network in configuration.networks
         }
-        self._rpc_urls = {network.network_id: network.rpc_url for network in configuration.networks}
+        self._rpc_urls = {
+            network.network_id: network.rpc_endpoints for network in configuration.networks
+        }
         #: Значок сети для уведомлений: свойство сети, а не формата.
         self._emoji = {network.network_id: network.emoji for network in configuration.networks}
 
@@ -70,9 +72,14 @@ class NetworkRegistry:
         """Все включённые сети."""
         return tuple(network for network in self._networks.values() if network.enabled)
 
+    def rpc_endpoints(self, network_id: NetworkId) -> tuple[str, ...]:
+        """Узлы сети в порядке обращения. Пусто — узлов нет."""
+        return self._rpc_urls.get(network_id, ())
+
     def rpc_url(self, network_id: NetworkId) -> str | None:
-        """RPC endpoint сети, если он задан."""
-        return self._rpc_urls.get(network_id)
+        """Основной узел сети, если он задан."""
+        endpoints = self.rpc_endpoints(network_id)
+        return endpoints[0] if endpoints else None
 
     def wrapped_native_token(self, network_id: NetworkId) -> TokenKey:
         """Canonical identity обёрнутого native token сети.

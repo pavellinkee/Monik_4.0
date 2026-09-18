@@ -208,7 +208,7 @@ def build_account(node: ScriptedNode, clock: FakeClock, address: str) -> ChainAc
         http=FakeHttpClient(handler=node),
         resources=resource_manager(clock),
         clock=clock,
-        rpc_urls={str(f.POLYGON): RPC_URL},
+        rpc_urls={str(f.POLYGON): (RPC_URL,)},
     )
 
 

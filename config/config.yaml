@@ -30,6 +30,12 @@ networks:
     # Базовый токен круга этой сети: вход и выход цикла.
     base_token_address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
     rpc_url: "https://polygon-bor-rpc.publicnode.com"
+    # Запасные узлы. Публичные узлы отказывают — 18.09 основной узел
+    # Arbitrum начал отвечать 403 на всё подряд, и подобрать квитанцию
+    # уже отправленной покупки стало нечем. Проверены живыми запросами
+    # в тот же день.
+    rpc_fallback_urls:
+      - "https://polygon.drpc.org"
     # Значок сети в уведомлении Telegram.
     emoji: "⛓️"
     enabled: true
@@ -48,7 +54,13 @@ networks:
     # USDT на Arbitrum. Адрес другой, чем на Polygon: одинаковый символ
     # не означает одинаковый контракт (01_PROJECT_REQUIREMENTS.md §11).
     base_token_address: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"
-    rpc_url: "https://arbitrum-one-rpc.publicnode.com"
+    # Официальный узел сети. Прежний (publicnode) 18.09 начал отвечать
+    # отказом 403 на все запросы подряд — вплоть до того, что подобрать
+    # квитанцию уже отправленной покупки стало нечем.
+    rpc_url: "https://arb1.arbitrum.io/rpc"
+    rpc_fallback_urls:
+      - "https://arbitrum.drpc.org"
+      - "https://arbitrum-one.public.blastapi.io"
     emoji: "🪀"
     enabled: true
     # В Arbitrum торга за место в блоке нет: проверка живых блоков 18.09

@@ -96,7 +96,7 @@ class TestRpcGasPriceProvider:
             http=FakeHttpClient(responses),
             resources=resource_manager(clock),
             clock=clock,
-            rpc_urls={str(f.POLYGON): "https://polygon-rpc.com"},
+            rpc_urls={str(f.POLYGON): ("https://polygon-rpc.com",)},
             freshness_seconds=60,
             # Надбавка принадлежит сети: у одной за место в блоке идёт
             # торг, у другой его нет вовсе.
@@ -247,7 +247,7 @@ class TestNetworkPriorityFee:
             ),
             resources=resource_manager(clock),
             clock=clock,
-            rpc_urls={str(f.POLYGON): "https://polygon-rpc.com"},
+            rpc_urls={str(f.POLYGON): ("https://polygon-rpc.com",)},
             freshness_seconds=60,
             priority_fees_wei=fees,
         )

@@ -404,9 +404,9 @@ def build_container(
             # Узел сети — тот же, что отвечает за цену газа: второго
             # источника для одной сети не заводится.
             rpc_urls={
-                str(network.network_id): url
+                str(network.network_id): endpoints
                 for network in networks.enabled()
-                if (url := networks.rpc_url(network.network_id)) is not None
+                if (endpoints := networks.rpc_endpoints(network.network_id))
             },
         ),
         tokens=tokens,
@@ -420,9 +420,9 @@ def build_container(
             resources=resources,
             clock=clock,
             rpc_urls={
-                str(network.network_id): url
+                str(network.network_id): endpoints
                 for network in networks.enabled()
-                if (url := networks.rpc_url(network.network_id)) is not None
+                if (endpoints := networks.rpc_endpoints(network.network_id))
             },
         )
         if wallet is not None
@@ -580,8 +580,11 @@ def _allowed_hosts(loaded: LoadedConfiguration) -> tuple[str, ...]:
         if base_url:
             urls.append(base_url)
     for network in config.networks:
-        if network.enabled and network.rpc_url:
-            urls.append(network.rpc_url)
+        if network.enabled:
+            # В список разрешённых адресов попадают все узлы сети, а не
+            # только основной: иначе переход на запасной упрётся в
+            # собственную политику.
+            urls.extend(network.rpc_endpoints)
     if config.prices.http_endpoint:
         urls.append(config.prices.http_endpoint)
     if config.notifications.telegram.enabled:
@@ -679,9 +682,9 @@ def _gas_providers(
         providers.append(StaticGasPriceProvider(clock, prices=dict(config.gas.static_wei_per_gas)))
     if GasSource.RPC in config.gas.sources:
         rpc_urls = {
-            str(network.network_id): url
+            str(network.network_id): endpoints
             for network in networks.enabled()
-            if (url := networks.rpc_url(network.network_id)) is not None
+            if (endpoints := networks.rpc_endpoints(network.network_id))
         }
         if rpc_urls:
             providers.append(
