@@ -54,17 +54,23 @@ def _wallet() -> TradingWallet:
     return TradingWallet(SecretValue("K", str(Account.create().key.hex())))
 
 
-def _candidate(raw_input: int, net_profit: str) -> Candidate:
+def _candidate(
+    raw_input: int,
+    net_profit: str,
+    *,
+    buy_provider: ProviderId = ProviderId.UNISWAP,
+    sell_provider: ProviderId = ProviderId.UNISWAP,
+) -> Candidate:
     buy = f.quote(
         operation=OperationType.BUY,
-        provider_id=ProviderId.UNISWAP,
+        provider_id=buy_provider,
         input_token=f.USDT,
         output_token=f.AAVE,
         input_raw=raw_input,
     )
     sell = f.quote(
         operation=OperationType.SELL,
-        provider_id=ProviderId.UNISWAP,
+        provider_id=sell_provider,
         input_token=f.AAVE,
         output_token=f.USDT,
         input_raw=buy.output_amount.raw,
@@ -108,6 +114,7 @@ def _executor(
     calibration: MemoryCalibration | None = None,
     slippage_bps: int = 0,
     rate: str = "1",
+    sell_rate: str | None = None,
 ) -> TradeExecutor:
     clock = FakeClock(f.NOW)
     wallet = _wallet()
@@ -116,7 +123,12 @@ def _executor(
         # проверки выбора и записи к предложению отношения не имеют, и
         # решать их исход должен не он.
         adapters={
-            ProviderId.UNISWAP.value: FakeAdapter(ProviderId.UNISWAP, clock, rate=Decimal(rate))
+            ProviderId.UNISWAP.value: FakeAdapter(ProviderId.UNISWAP, clock, rate=Decimal(rate)),
+            # Второй агрегатор нужен сделкам между ними: круг может быть
+            # куплен у одного и продан у другого.
+            ProviderId.KYBERSWAP.value: FakeAdapter(
+                ProviderId.KYBERSWAP, clock, rate=Decimal(sell_rate or rate)
+            ),
         },
         positions=positions,
         sequences=MemorySequences(),
@@ -399,3 +411,68 @@ class TestPriority:
     def test_buy_yields_to_sell_and_outranks_scanning(self) -> None:
         assert RequestPriority.ANN_SELL.rank < RequestPriority.ANN_BUY.rank
         assert RequestPriority.ANN_BUY.rank < RequestPriority.ANN_SCAN.rank
+
+
+class TestCrossAggregator:
+    """Круг между двумя агрегаторами: купили у одного, продали у другого.
+
+    Это основная модель арбитража, а не частный случай. Каждую ногу
+    собирает **её** агрегатор: спрашивать предложение о продаже у того,
+    кто её исполнять не будет, бессмысленно.
+    """
+
+    def _node(self) -> ScriptedNode:
+        return ScriptedNode(
+            balances={USDT_ADDRESS: 60_000_000},
+            after_send={str(f.AAVE.address).lower(): 5 * 10**18},
+        )
+
+    async def test_each_leg_is_offered_by_its_own_aggregator(self) -> None:
+        positions = MemoryPositions()
+        node = self._node()
+        executor = _executor(node, positions, rate="1.001")
+        buyer = executor._adapters[ProviderId.UNISWAP.value]  # noqa: SLF001
+        seller = executor._adapters[ProviderId.KYBERSWAP.value]  # noqa: SLF001
+
+        position = await executor.consider(
+            (
+                _result(
+                    _candidate(
+                        50_000_000,
+                        "0.1",
+                        buy_provider=ProviderId.UNISWAP,
+                        sell_provider=ProviderId.KYBERSWAP,
+                    )
+                ),
+            )
+        )
+
+        assert position is not None
+        assert position.buy_provider_id is ProviderId.UNISWAP
+        assert position.sell_provider_id is ProviderId.KYBERSWAP
+        # Покупку спрашивали у одного, продажу — у другого.
+        assert [r.operation for r in buyer.quote_calls] == [OperationType.BUY]
+        assert [r.operation for r in seller.quote_calls] == [OperationType.SELL]
+
+    async def test_trade_is_skipped_without_the_exit_aggregator(self) -> None:
+        """Продавать некому — покупать незачем."""
+        positions = MemoryPositions()
+        node = self._node()
+        executor = _executor(node, positions, rate="1.001")
+        del executor._adapters[ProviderId.KYBERSWAP.value]  # noqa: SLF001
+
+        position = await executor.consider(
+            (
+                _result(
+                    _candidate(
+                        50_000_000,
+                        "0.1",
+                        buy_provider=ProviderId.UNISWAP,
+                        sell_provider=ProviderId.KYBERSWAP,
+                    )
+                ),
+            )
+        )
+
+        assert position is None
+        assert not node.sent

@@ -189,9 +189,7 @@ class TradeExecutor:
         reserved = await self._positions.reserved_raw_input(network_id)
         return max(balance.raw - reserved, 0)
 
-    async def _offer_allows(
-        self, choice: _Choice, adapter: AggregatorAdapter, buy: SwapTransaction
-    ) -> bool:
+    async def _offer_allows(self, choice: _Choice, buy: SwapTransaction) -> bool:
         """Проверить находку по **реальному предложению**, а не по котировке.
 
         Агрегатор — обменник, а не биржа: он называет цену сам и может
@@ -207,6 +205,10 @@ class TradeExecutor:
         остаётся не меньше порога, сделка возможна; иначе её нет, каким бы
         заманчивым ни было обещание.
 
+        Ноги могут принадлежать **разным** агрегаторам: круг «купил у
+        одного, продал у другого» — основная модель арбитража. Поэтому
+        каждую ногу собирает её собственный агрегатор.
+
         Обе ноги стоят по одному запросу, и делаются они у **одного**
         кандидата, прошедшего порог: за проход таких проверок ноль или
         одна, тогда как комбинаций двенадцать.
@@ -214,8 +216,18 @@ class TradeExecutor:
         Если предложение получить не удалось, сделка не открывается.
         Непроверенное предложение — не предложение (``CLAUDE.md`` §12).
         """
+        # Продажу собирает **её** агрегатор, а не тот, у кого куплено:
+        # круг может идти между двумя разными, и предложение спрашивается
+        # у того, кто будет его исполнять.
+        seller = self._adapters.get(choice.candidate.sell_quote.provider_id.value)
+        if seller is None:
+            _LOGGER.info(
+                "trade skipped: the exit aggregator is not available",
+                extra=self._describe(choice),
+            )
+            return False
         guaranteed_target = choice.target.amount_from_base_units(buy.min_output_raw)
-        sell = await self._build_exit(choice, adapter, guaranteed_target)
+        sell = await self._build_exit(choice, seller, guaranteed_target)
         if sell is None:
             return False
         price = await self._account.gas_price(choice.base.network_id, priority=_PRIORITY)
@@ -256,7 +268,7 @@ class TradeExecutor:
         return True
 
     async def _build_exit(
-        self, choice: _Choice, adapter: AggregatorAdapter, amount: TokenAmount
+        self, choice: _Choice, seller: AggregatorAdapter, amount: TokenAmount
     ) -> SwapTransaction | None:
         """Собрать ногу продажи на то количество, которое мы получим.
 
@@ -269,7 +281,7 @@ class TradeExecutor:
         по остатку, и минимум с пределом газа называет.
         """
         try:
-            return await adapter.build_swap(
+            return await seller.build_swap(
                 QuoteRequest(
                     network_id=choice.base.network_id,
                     operation=OperationType.SELL,
@@ -312,7 +324,7 @@ class TradeExecutor:
                 priority=RequestPriority.ANN_BUY,
             )
         )
-        if not await self._offer_allows(choice, adapter, transaction):
+        if not await self._offer_allows(choice, transaction):
             return None
         simulation = await self._account.simulate(transaction, priority=_PRIORITY)
         if not simulation.succeeded:

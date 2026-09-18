@@ -170,8 +170,10 @@ providers:
       swapper: "0xc6fb9692Fff871e1b4874E8Dc0620fd77CE02390"
 
   - provider_id: uniswap
-    # Остановлен по решению оператора 18.09.
-    enabled: false
+    enabled: true
+    # Работает в торговом проходе вместе с KyberSwap: круг «купил у
+    # одного, продал у другого» — основная модель арбитража, и для неё
+    # в режиме нужны оба (решение оператора 18.09).
     modes: [ur, fest, ann]
     emoji: "🧩"
     ui_url: "https://app.uniswap.org/swap"
