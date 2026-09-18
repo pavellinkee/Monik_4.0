@@ -137,11 +137,9 @@ providers:
     supported_networks: [polygon]
 
   - provider_id: kyberswap
-    # Выключен по решению оператора 18.09. Исполнение сделок его адаптер
-    # не поддерживает: он умеет только получать котировки.
-    enabled: false
-    # Участвует в обоих режимах.
-    modes: [ur, fest]
+    enabled: true
+    # Единственный агрегатор торгового режима с 18.09 (решение оператора).
+    modes: [ur, fest, ann]
     emoji: "🖲️"
     ui_url: "https://kyberswap.com/swap/"
     # Покупка и продажа у этого агрегатора. Разрешение двухуровневое:
@@ -166,11 +164,14 @@ providers:
     ui_urls:
       polygon: "https://kyberswap.com/swap/polygon"
       arbitrum: "https://kyberswap.com/swap/arbitrum"
+    options:
+      # Адрес, от имени которого собирается транзакция. Это торговый счёт
+      # режима ann: исполнит её именно он, и calldata собирается под него.
+      swapper: "0xc6fb9692Fff871e1b4874E8Dc0620fd77CE02390"
 
   - provider_id: uniswap
-    enabled: true
-    # Единственный агрегатор торгового режима: на суммах 50-100 USDT
-    # только у него газ укладывается в целевую прибыль.
+    # Остановлен по решению оператора 18.09.
+    enabled: false
     modes: [ur, fest, ann]
     emoji: "🧩"
     ui_url: "https://app.uniswap.org/swap"
@@ -333,6 +334,9 @@ tokens:
     decimals: 6
     usd_stable: true
     rank: 2
+    # Приостановлен по решению оператора 18.09: торговый проход
+    # временно работает одной парой USDT/DAI.
+    enabled: false
 
   - network_id: arbitrum
     # Мостовой USDC. Контракт в сети отвечает символом USDC — это
@@ -342,6 +346,9 @@ tokens:
     decimals: 6
     usd_stable: true
     rank: 3
+    # Приостановлен по решению оператора 18.09: торговый проход
+    # временно работает одной парой USDT/DAI.
+    enabled: false
 
   - network_id: arbitrum
     address: "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1"

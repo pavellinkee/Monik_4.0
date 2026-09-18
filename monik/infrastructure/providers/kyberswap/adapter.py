@@ -2,8 +2,9 @@
 
 KyberSwap отдаёт маршрут одним запросом ``GET /{сеть}/api/v1/routes``:
 сумма на выходе, расход и цена газа и состав маршрута приходят вместе.
-Второй шаг (``/route/build``) строит транзакцию и Monik не нужен: свопы
-он не исполняет (``01_PROJECT_REQUIREMENTS.md`` §55).
+Второй шаг — ``POST /route/build`` — превращает выбранный маршрут в
+вызов роутера. Он нужен режиму ``ann``, который сделки исполняет
+(``the_main_rules.md``, правило 11).
 
 Особенности провайдера, переведённые здесь в общие понятия:
 
@@ -12,7 +13,15 @@ KyberSwap отдаёт маршрут одним запросом ``GET /{сет
   статусом HTTP: ``4008`` и ``4010`` означают отсутствие маршрута, а
   ``4011`` — что провайдер не знает токен;
 * ``amountOut`` — сумма, которую получает владелец, партнёрская комиссия
-  не задаётся и в ответе пуста.
+  не задаётся и в ответе пуста;
+* **гарантированного минимума в ответе нет.** Uniswap называет его полем
+  ``minimumAmount``, KyberSwap — только зашивает в calldata, а наружу
+  отдаёт лишь ожидаемый выход и заданный нами допуск. Минимум поэтому
+  выводится здесь: ``amountOut × (10000 − допуск) / 10000``. Вывод
+  проверен на живом API 2026-09-18 — полученное число найдено в самой
+  calldata при допусках 1, 10 и 100 базисных пунктов;
+* списание идёт **напрямую роутером**, без Permit2: разрешение нужно
+  одно, а не два, как у Uniswap.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ from monik.domain.enums.operations import (
 )
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import DataError, MonikError, UnsupportedError
+from monik.domain.models.execution import AllowanceKind, AllowanceRequirement, SwapTransaction
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
 from monik.domain.models.route import Route, RouteStep
@@ -118,6 +128,7 @@ class KyberSwapAdapter(HttpProviderAdapter):
             supports_fixed_route=_SUPPORTS_FIXED_ROUTE,
             supports_fee_discovery=False,
             supports_gas_estimate=True,
+            supports_execution=True,
         )
 
     @property
@@ -152,6 +163,61 @@ class KyberSwapAdapter(HttpProviderAdapter):
         )
         with normalized_response(_PROVIDER):
             return self._to_quote(request, payload)
+
+    async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
+        """Собрать вызов роутера по свежему маршруту.
+
+        Два обращения: ``GET /routes`` находит маршрут, ``POST
+        /route/build`` превращает его в calldata. Маршрут передаётся
+        целиком и без изменений — провайдер проверяет его контрольной
+        суммой, и правка любого поля делает маршрут негодным.
+
+        Котировка берётся заново, а не переиспользуется: транзакция
+        отправляется по свежей цене, а не по той, на которой возможность
+        была найдена минутой раньше.
+        """
+        if request.slippage_bps is None:
+            raise DataError(
+                "kyberswap swap requires an explicit slippage tolerance: "
+                "without it the guaranteed minimum is unknown",
+                code="slippage_missing",
+                provider_code=_PROVIDER.value,
+            )
+        slug = self._require_network(request.network_id)
+        route_payload = await self.request_json(
+            path=endpoints.routes_path(slug),
+            network_id=request.network_id,
+            operation=self._capability_operation(request),
+            request_id=request.request_id,
+            params=self._route_params(request),
+            priority=request.priority,
+            correlation_id=request.correlation_id,
+            timeout=request.timeout,
+            priority_at=request.priority_at,
+        )
+        with normalized_response(_PROVIDER):
+            quote = self._to_quote(request, route_payload)
+            summary = self._route_summary(route_payload)
+        sender = self._require_swapper()
+        build_payload = await self.request_json(
+            path=endpoints.build_path(slug),
+            network_id=request.network_id,
+            operation=self._capability_operation(request),
+            request_id=RequestId.generate(),
+            method="POST",
+            json_body={
+                "routeSummary": summary,
+                "sender": sender,
+                "recipient": sender,
+                "slippageTolerance": request.slippage_bps,
+            },
+            priority=request.priority,
+            correlation_id=request.correlation_id,
+            timeout=request.timeout,
+            priority_at=request.priority_at,
+        )
+        with normalized_response(_PROVIDER):
+            return self._to_swap(request, quote, build_payload)
 
     async def validate_fixed_route(self, request: QuoteRequest) -> RouteValidation:
         """Сравнить свежий маршрут с зафиксированным Level 1."""
@@ -259,6 +325,68 @@ class KyberSwapAdapter(HttpProviderAdapter):
             deduplication_key=key,
         )
 
+    def _to_swap(self, request: QuoteRequest, quote: Quote, payload: Any) -> SwapTransaction:
+        """Преобразовать ответ ``/route/build`` в транзакцию."""
+        data = self._build_data(payload)
+        output_raw = parse_base_units(
+            require_field(data, "amountOut", provider=_PROVIDER),
+            provider=_PROVIDER,
+            field="amountOut",
+        )
+        bps = request.slippage_bps or 0
+        return SwapTransaction(
+            provider_id=_PROVIDER,
+            network_id=request.network_id,
+            chain_id=self._require_chain_id(request.network_id),
+            to=str(require_field(data, "routerAddress", provider=_PROVIDER)),
+            data=str(require_field(data, "data", provider=_PROVIDER)),
+            value=parse_base_units(
+                data.get("transactionValue", "0"), provider=_PROVIDER, field="transactionValue"
+            ),
+            gas_limit=parse_base_units(
+                require_field(data, "gas", provider=_PROVIDER), provider=_PROVIDER, field="gas"
+            ),
+            # Одно разрешение вместо двух: роутер списывает токен сам,
+            # без посредника вроде Permit2.
+            allowances=(
+                AllowanceRequirement(
+                    kind=AllowanceKind.ERC20,
+                    contract=str(request.input_token.address),
+                    spender=str(require_field(data, "routerAddress", provider=_PROVIDER)),
+                ),
+            ),
+            quote=quote,
+            # Минимум провайдер наружу не отдаёт — только зашивает в
+            # calldata. Выводим его из того же правила, по которому он
+            # зашит, и не ниже единицы: ноль означал бы согласие получить
+            # ничего.
+            min_output_raw=max(output_raw * (10_000 - bps) // 10_000, 1),
+        )
+
+    @staticmethod
+    def _build_data(payload: Any) -> dict[str, Any]:
+        """Полезная часть ответа сборки."""
+        data = require_field(payload, "data", provider=_PROVIDER)
+        if not isinstance(data, dict):
+            raise DataError(
+                "kyberswap build response has no data object",
+                code="provider_response_malformed",
+                provider_code=_PROVIDER.value,
+            )
+        return data
+
+    def _require_swapper(self) -> str:
+        """Адрес, от имени которого собирается транзакция."""
+        swapper = self._config.options.get("swapper")
+        if not swapper:
+            raise UnsupportedError(
+                "kyberswap swap requires the trading account address in "
+                "providers[kyberswap].options.swapper",
+                code="provider_swapper_missing",
+                provider_code=_PROVIDER.value,
+            )
+        return str(swapper)
+
     @staticmethod
     def _route_params(request: QuoteRequest) -> dict[str, str]:
         """Параметры запроса маршрута."""
@@ -277,6 +405,16 @@ class KyberSwapAdapter(HttpProviderAdapter):
                 provider_code=_PROVIDER.value,
             )
         return slug
+
+    def _require_chain_id(self, network_id: NetworkId) -> int:
+        chain_id = endpoints.chain_id_for(network_id)
+        if chain_id is None:
+            raise UnsupportedError(
+                f"kyberswap adapter does not know the chain id of {network_id}",
+                code="provider_network_unsupported",
+                provider_code=_PROVIDER.value,
+            )
+        return chain_id
 
     @staticmethod
     def _capability_operation(request: QuoteRequest) -> CapabilityOperation:

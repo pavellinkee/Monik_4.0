@@ -24,6 +24,9 @@ __all__ = [
     "SUPPORTED_NETWORK_SLUGS",
     "HealthProbe",
     "network_slug_for",
+    "SUPPORTED_CHAIN_IDS",
+    "build_path",
+    "chain_id_for",
     "routes_path",
 ]
 
@@ -80,6 +83,30 @@ def network_slug_for(network_id: NetworkId) -> str | None:
     return SUPPORTED_NETWORK_SLUGS.get(str(network_id))
 
 
+#: Идентификаторы сетей. API адресуется обозначением в пути, а не
+#: числом, но собранная транзакция принадлежит конкретной цепи, и число
+#: нужно ей. Значения общеизвестны и проверяются вместе с сетью.
+SUPPORTED_CHAIN_IDS: dict[str, int] = {
+    "polygon": 137,
+    "arbitrum": 42161,
+}
+
+
+def chain_id_for(network_id: NetworkId) -> int | None:
+    """Идентификатор цепи сети, если адаптер её знает."""
+    return SUPPORTED_CHAIN_IDS.get(str(network_id))
+
+
 def routes_path(slug: str) -> str:
     """Путь получения маршрута для сети."""
     return f"/{slug}/api/v1/routes"
+
+
+def build_path(slug: str) -> str:
+    """Путь сборки транзакции по уже полученному маршруту.
+
+    Маршрут возвращается из :func:`routes_path` и передаётся сюда целиком
+    и без изменений: собственные поля ``routeSummary`` провайдер проверяет
+    контрольной суммой, и правка любого из них делает маршрут негодным.
+    """
+    return f"/{slug}/api/v1/route/build"
