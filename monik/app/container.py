@@ -469,6 +469,7 @@ def build_container(
             min_entry_profit_raw=int(
                 config.trading.min_exit_profit_waiting * (10 ** max(base_decimals.values()))
             ),
+            max_offer_checks=config.trading.max_offer_checks,
             receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
             receipt_poll_seconds=config.trading.receipt_poll_seconds,
         )

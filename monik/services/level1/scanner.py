@@ -42,7 +42,7 @@ from monik.services.level1.quotes import (
     QuoteCollector,
     QuoteStatistics,
 )
-from monik.services.level1.ranking import rank_groups
+from monik.services.level1.ranking import rank_candidates, rank_groups
 from monik.services.level1.results import ScanResult
 from monik.services.level1.scope import ScopeBuilder
 from monik.services.observability import names
@@ -308,9 +308,11 @@ class Level1Scanner:
             candidate for candidate in candidates if _passes_preliminary_threshold(candidate)
         )
         # Торговый режим выбирает по заработку в базовом токене, остальные —
-        # по доходности в процентах.
-        groups = rank_groups(group_candidates(qualified), by_profit=scan.scope.mode is ScanMode.ANN)
-        ranked = tuple(candidate for group in groups for candidate in group.candidates)
+        # по доходности в процентах. Порядок нужен и между группами, и
+        # внутри них: суммы одной группы различаются именно заработком.
+        by_profit = scan.scope.mode is ScanMode.ANN
+        groups = rank_groups(group_candidates(qualified), by_profit=by_profit)
+        ranked = rank_candidates(groups, by_profit=by_profit)
         if scan.scope.mode not in self._dispatch_modes:
             _log_observed(scan.scope.mode, groups)
             return (), 0, ranked

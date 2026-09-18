@@ -476,3 +476,104 @@ class TestCrossAggregator:
 
         assert position is None
         assert not node.sent
+
+
+class TestCandidateIteration:
+    """Отказ по предложению не заканчивает проход.
+
+    Находка с завышенной котировкой выглядит лучшей и встаёт первой,
+    заслоняя собой честные. Так и случилось 18.09: одна находка
+    KyberSwap трижды закрывала собой остальные, среди которых были пары
+    через Uniswap. Поэтому после отказа перебор идёт дальше — до
+    первого кандидата, чьё **предложение** порог проходит.
+    """
+
+    def _node(self) -> ScriptedNode:
+        return ScriptedNode(
+            balances={USDT_ADDRESS: 200_000_000},
+            after_send={str(f.AAVE.address).lower(): 5 * 10**18},
+        )
+
+    def _results(self, *candidates: Candidate) -> tuple[ScanResult, ...]:
+        return (_result(*candidates),)
+
+    async def test_rejected_candidate_does_not_end_the_scan(self) -> None:
+        """Первая находка не окупается, вторая окупается — берём вторую."""
+        positions = MemoryPositions()
+        node = self._node()
+        # Стоимость круга 0.15: первая находка обещает 0.1 и не окупается,
+        # вторая обещает 1.0 и окупается.
+        executor = _executor(
+            node, positions, costs=FixedCosts(150_000), min_entry_profit_raw=5_000, rate="1.001"
+        )
+
+        position = await executor.consider(
+            self._results(
+                _candidate(50_000_000, "0.1"),
+                _candidate(100_000_000, "1.0"),
+            )
+        )
+
+        assert position is not None
+        assert position.raw_input == 100_000_000, "открыта вторая находка"
+
+    async def test_every_rejection_leaves_the_account_untouched(self) -> None:
+        """Ни один отказ не отправляет транзакции."""
+        positions = MemoryPositions()
+        node = self._node()
+        executor = _executor(
+            node, positions, costs=FixedCosts(500_000), min_entry_profit_raw=5_000, rate="1.001"
+        )
+
+        position = await executor.consider(
+            self._results(
+                _candidate(50_000_000, "0.1"),
+                _candidate(100_000_000, "0.2"),
+            )
+        )
+
+        assert position is None
+        assert not node.sent
+        assert positions.items == {}
+
+    async def test_number_of_checks_is_bounded(self) -> None:
+        """Отказ стоит запросов, и весь список перебирать незачем."""
+        positions = MemoryPositions()
+        node = self._node()
+        executor = _executor(
+            node, positions, costs=FixedCosts(500_000), min_entry_profit_raw=5_000, rate="1.001"
+        )
+        executor._max_offer_checks = 1  # noqa: SLF001
+        adapter = executor._adapters[ProviderId.UNISWAP.value]  # noqa: SLF001
+
+        await executor.consider(
+            self._results(
+                _candidate(50_000_000, "0.1"),
+                _candidate(100_000_000, "0.2"),
+                _candidate(50_000_000, "0.3"),
+            )
+        )
+
+        # Проверен ровно один кандидат: покупка и нога продажи.
+        assert len(adapter.quote_calls) == 2
+
+    async def test_unaffordable_candidate_does_not_stop_the_rest(self) -> None:
+        """Сумма, не помещающаяся в остаток, отбрасывается, а не всё."""
+        positions = MemoryPositions()
+        node = ScriptedNode(
+            balances={USDT_ADDRESS: 60_000_000},
+            after_send={str(f.AAVE.address).lower(): 5 * 10**18},
+        )
+        executor = _executor(
+            node, positions, costs=FixedCosts(0), min_entry_profit_raw=0, rate="1.001"
+        )
+
+        position = await executor.consider(
+            self._results(
+                _candidate(100_000_000, "1.0"),
+                _candidate(50_000_000, "0.1"),
+            )
+        )
+
+        assert position is not None
+        assert position.raw_input == 50_000_000

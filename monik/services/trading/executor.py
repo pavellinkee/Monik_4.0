@@ -85,6 +85,7 @@ class TradeExecutor:
         is_execution_open: Callable[[], bool],
         slippage_bps: int,
         min_entry_profit_raw: int,
+        max_offer_checks: int = 10,
         receipt_timeout_seconds: int = 120,
         receipt_poll_seconds: int = 2,
     ) -> None:
@@ -101,6 +102,10 @@ class TradeExecutor:
         self._is_execution_open = is_execution_open
         self._slippage_bps = slippage_bps
         self._min_entry_profit_raw = min_entry_profit_raw
+        #: Сколько находок проверять предложением за один проход. Отказ
+        #: стоит запросов, и перебирать весь список в цикле, где ни одна
+        #: не подтверждается, незачем.
+        self._max_offer_checks = max_offer_checks
         self._receipt_timeout = timedelta(seconds=receipt_timeout_seconds)
         self._receipt_poll = timedelta(seconds=receipt_poll_seconds)
         #: Немедленная проверка выхода после удачной покупки. Ставится
@@ -123,32 +128,54 @@ class TradeExecutor:
     async def consider(self, results: tuple[ScanResult, ...]) -> Position | None:
         """Рассмотреть находки прохода и, если можно, открыть сделку.
 
-        За один проход открывается **одна** сделка: транзакции счёта идут
+        За один проход **открывается** одна сделка: транзакции счёта идут
         по очереди, и вторая покупка всё равно ждала бы первую, а цена за
         это время уже другая.
+
+        Но **проверяется** не одна. Отказ по предложению не означает, что
+        плох весь проход: находка с завышенной котировкой выглядит лучшей
+        и становится первой, заслоняя собой честные. Поэтому кандидаты
+        перебираются по убыванию заработка до первого, чьё предложение
+        порог проходит.
+
+        Перебор ограничен: отказ стоит запросов, и в цикле, где ни одна
+        находка не подтверждается, тратить их на весь список незачем.
         """
-        choice = await self._choose(results)
-        if choice is None:
+        candidates = await self._affordable(results)
+        if not candidates:
             return None
         if not self._is_execution_open():
             _LOGGER.info(
                 "trade withheld: execution is disabled",
-                extra=self._describe(choice),
+                extra=self._describe(candidates[0]),
             )
             return None
-        return await self._open(choice)
+        for choice in candidates[: self._max_offer_checks]:
+            opened = await self._open(choice)
+            if opened is not None:
+                return opened
+        rejected = min(len(candidates), self._max_offer_checks)
+        _LOGGER.info(
+            "no candidate of this scan offered a paying circle",
+            extra=log_fields(checked=rejected, qualified=len(candidates)),
+        )
+        return None
 
     # --- выбор ------------------------------------------------------------
 
-    async def _choose(self, results: tuple[ScanResult, ...]) -> _Choice | None:
-        """Лучшая находка, которую позволяет остаток счёта.
+    async def _affordable(self, results: tuple[ScanResult, ...]) -> tuple[_Choice, ...]:
+        """Находки, которые позволяет остаток счёта, в порядке заработка.
 
-        Кандидаты уже отсортированы по заработку. Из них берётся первый,
-        чья сумма помещается в свободный остаток: правило «не хватает
-        средств — сделка не производится» относится к набору целиком, а не
-        к каждой сумме по отдельности.
+        Порядок задан сканером: торговый режим ранжирует и группы, и
+        кандидатов внутри них по заработку в базовом токене
+        (``the_main_rules.md``, правило 11). Здесь он только сохраняется.
+
+        Правило «не хватает средств — сделка не производится» относится к
+        сумме, а не к набору: находка, которая в остаток не помещается,
+        отбрасывается, а остальные рассматриваются дальше.
         """
         available: dict[NetworkId, int] = {}
+        affordable: list[_Choice] = []
         for result in results:
             network_id = result.scan.scope.networks[0]
             if network_id not in available:
@@ -158,7 +185,8 @@ class TradeExecutor:
                 if choice is None:
                     continue
                 if candidate.buy_quote.input_amount.raw <= available[network_id]:
-                    return choice
+                    affordable.append(choice)
+                    continue
                 _LOGGER.info(
                     "trade skipped: balance does not cover the amount",
                     extra=log_fields(
@@ -167,7 +195,7 @@ class TradeExecutor:
                         available=str(Decimal(available[network_id])),
                     ),
                 )
-        return None
+        return tuple(affordable)
 
     def _as_choice(self, candidate: Candidate, network_id: NetworkId) -> _Choice | None:
         base = self._tokens.get(candidate.buy_quote.input_token)

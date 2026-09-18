@@ -20,6 +20,7 @@ from monik.services.level1 import (
     quote_rejection_reason,
     rank_groups,
 )
+from monik.services.level1.ranking import rank_candidates
 from tests import factories as f
 
 MAX_AGE = timedelta(seconds=30)
@@ -345,3 +346,41 @@ def test_ranking_handles_any_sign_of_roi(net_roi: str) -> None:
     assert ranked == (group,)
     assert group.candidates[0].preliminary_result.net_roi is not None
     assert group.candidates[0].preliminary_result.net_roi.value == Decimal(net_roi)
+
+
+def _sized(raw_input: int, profit: str, roi: str) -> Candidate:
+    """Кандидат заданной суммы с заданным заработком."""
+    base = candidate(net_roi=roi)
+    result = base.preliminary_result.model_copy(update={"net_profit": Decimal(profit)})
+    buy = base.buy_quote.model_copy(
+        update={"input_amount": f.USDT.amount_from_base_units(raw_input)}
+    )
+    return base.model_copy(update={"buy_quote": buy, "preliminary_result": result})
+
+
+def test_trading_mode_orders_candidates_inside_a_group_by_earning() -> None:
+    """Группа — это пара «токен и агрегаторы», а различаются суммы.
+
+    Доходность в процентах у разных сумм почти одинакова, а заработок
+    отличается кратно. Порядок сканирования поставил бы меньшую сумму
+    впереди большей, и торговый режим взял бы её — вопреки правилу
+    выбирать наибольший заработок (``the_main_rules.md``, правило 11).
+    """
+    groups = group_candidates(
+        (_sized(50_000_000, "0.062", "0.124"), _sized(100_000_000, "0.130", "0.131"))
+    )
+
+    ordered = rank_candidates(groups, by_profit=True)
+
+    assert [c.buy_quote.input_amount.raw for c in ordered] == [100_000_000, 50_000_000]
+
+
+def test_search_modes_keep_the_order_they_had() -> None:
+    """Режимы поиска денег не тратят, и порядок сумм им безразличен."""
+    groups = group_candidates(
+        (_sized(50_000_000, "0.062", "0.124"), _sized(100_000_000, "0.130", "0.131"))
+    )
+
+    ordered = rank_candidates(groups, by_profit=False)
+
+    assert [c.buy_quote.input_amount.raw for c in ordered] == [50_000_000, 100_000_000]
