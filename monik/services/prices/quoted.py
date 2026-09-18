@@ -44,12 +44,21 @@ def gas_rate_from_quotes(
     *,
     target: Token,
     now: UtcDatetime,
+    units_correction: Decimal = Decimal(1),
 ) -> ConversionRate | None:
     """Курс native token в валюту расчёта по стоимости газа.
 
     Возвращает ``None``, если валюта расчёта не привязана к доллару, если
     стоимость газа в native token неизвестна, либо если ни одна котировка
     не сообщила долларовую стоимость.
+
+    ``units_correction`` — во сколько раз оценка расхода была увеличена
+    поправкой. Курс выводится по **неисправленной** стоимости, то есть по
+    той самой, к которой относится названная агрегатором долларовая
+    цифра. Делить на исправленную нельзя: курс уменьшился бы ровно во
+    столько же раз, во сколько выросли единицы, поправка сократилась бы, и
+    стоимость газа осталась бы равной оценке агрегатора — той, которую
+    поправка и призвана исправить.
     """
     if not target.usd_stable:
         return None
@@ -58,10 +67,13 @@ def gas_rate_from_quotes(
     cost_usd = _first_cost_usd(quotes)
     if cost_usd is None or cost_usd <= Decimal(0):
         return None
+    if units_correction <= Decimal(0):
+        return None
+    quoted_native = gas.cost_native / units_correction
     return ConversionRate(
         from_token=gas.native_token,
         to_token=target.key,
-        rate=cost_usd / gas.cost_native,
+        rate=cost_usd / quoted_native,
         source=SOURCE,
         observed_at=now,
     )

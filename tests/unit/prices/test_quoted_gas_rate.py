@@ -90,3 +90,69 @@ class TestRefusals:
             gas_rate_from_quotes(_gas("0.01"), (_quote("0"),), target=f.USDT_STABLE, now=f.NOW)
             is None
         )
+
+
+class TestCorrectedUnits:
+    """Поправка к расходу не должна сокращаться сама с собой.
+
+    Курс выводится делением долларовой цифры агрегатора на стоимость в
+    native token. Долларовая цифра относится к **необоснованно низкой**
+    оценке расхода — к той самой, которую поправка и исправляет. Поэтому
+    делить надо на неисправленную стоимость: иначе курс уменьшится ровно
+    во столько же раз, во сколько выросли единицы, и стоимость газа
+    останется равной оценке агрегатора.
+    """
+
+    def test_rate_is_derived_from_the_uncorrected_cost(self) -> None:
+        """Расход утроен, значит курс считается по трети стоимости."""
+        rate = gas_rate_from_quotes(
+            _gas("0.03"),  # 0.01 POL по котировке, утроенные поправкой
+            (_quote("0.005"),),
+            target=f.USDT_STABLE,
+            now=f.NOW,
+            units_correction=Decimal(3),
+        )
+
+        assert rate is not None
+        # 0.005 доллара приходились на 0.01 POL: курс прежний, настоящий.
+        assert rate.rate == Decimal("0.5")
+
+    def test_corrected_gas_ends_up_costing_more(self) -> None:
+        """Проверка того, ради чего поправка и вводилась.
+
+        Стоимость газа — это ``cost_native × rate``. При утроенном расходе
+        она обязана вырасти втрое, а не остаться равной оценке агрегатора.
+        """
+        # Числа подобраны так, чтобы делиться нацело: проверяется
+        # тождество, а не поведение округления.
+        gas = _gas("0.03")
+        quoted_usd = Decimal("0.006")
+
+        without = gas_rate_from_quotes(
+            gas, (_quote(str(quoted_usd)),), target=f.USDT_STABLE, now=f.NOW
+        )
+        with_correction = gas_rate_from_quotes(
+            gas,
+            (_quote(str(quoted_usd)),),
+            target=f.USDT_STABLE,
+            now=f.NOW,
+            units_correction=Decimal(3),
+        )
+
+        assert without is not None and with_correction is not None
+        assert gas.cost_native is not None
+        assert gas.cost_native * without.rate == quoted_usd, "поправка сократилась"
+        assert gas.cost_native * with_correction.rate == quoted_usd * 3
+
+    def test_meaningless_correction_yields_no_rate(self) -> None:
+        """Ноль или отрицательная поправка — не курс, а ошибка."""
+        assert (
+            gas_rate_from_quotes(
+                _gas("0.03"),
+                (_quote("0.005"),),
+                target=f.USDT_STABLE,
+                now=f.NOW,
+                units_correction=Decimal(0),
+            )
+            is None
+        )

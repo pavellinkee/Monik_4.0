@@ -22,7 +22,11 @@ from monik.domain.models.profit import ProfitCalculationInput, ProfitResult
 from monik.domain.models.quote import Quote
 from monik.services.calculator.profit import ProfitCalculator
 from monik.services.fees.context import FeeContext
-from monik.services.gas.round_trip import GasUnitsCorrection, round_trip_gas_units
+from monik.services.gas.round_trip import (
+    GasUnitsCorrection,
+    round_trip_correction,
+    round_trip_gas_units,
+)
 from monik.services.level2.ports import FeeSnapshotSource, GasSource, RateSource
 from monik.services.prices.quoted import gas_rate_from_quotes
 from monik.services.registries.networks import NetworkRegistry
@@ -123,7 +127,16 @@ class Level2Financials:
         if native is None or target is None or native.key == target.key:
             return None
         quoted = gas_rate_from_quotes(
-            gas, (buy_quote, sell_quote), target=target, now=gas.observed_at
+            gas,
+            (buy_quote, sell_quote),
+            target=target,
+            now=gas.observed_at,
+            # Курс выводится по той стоимости, к которой относится
+            # долларовая цифра агрегатора, — то есть до поправки. Иначе
+            # поправка сократилась бы сама с собой.
+            units_correction=round_trip_correction(
+                buy_quote, sell_quote, correction=self._gas_correction
+            ),
         )
         if quoted is not None:
             return quoted

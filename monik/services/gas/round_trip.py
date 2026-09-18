@@ -19,7 +19,7 @@ from monik.domain.enums.providers import ProviderId
 from monik.domain.models.quote import Quote
 from monik.domain.value_objects.identity import NetworkId
 
-__all__ = ["GasUnitsCorrection", "round_trip_gas_units"]
+__all__ = ["GasUnitsCorrection", "round_trip_correction", "round_trip_gas_units"]
 
 
 class GasUnitsCorrection(Protocol):
@@ -48,3 +48,23 @@ def round_trip_gas_units(
             units *= correction.factor(quote.network_id, quote.provider_id)
         total += int(units.to_integral_value(rounding=ROUND_CEILING))
     return total
+
+
+def round_trip_correction(
+    buy_quote: Quote, sell_quote: Quote, *, correction: GasUnitsCorrection | None = None
+) -> Decimal:
+    """Во сколько раз поправка увеличила оценку расхода круга.
+
+    Нужна там, где курс native token выводится из самой котировки. Такой
+    курс считается делением названной агрегатором долларовой стоимости на
+    стоимость в native token, и если делить на **исправленную** стоимость,
+    поправка сокращается: курс уменьшится ровно во столько же раз, во
+    сколько выросли единицы, и итоговая стоимость останется прежней.
+
+    Возвращает ``1``, когда поправки нет или считать её не из чего.
+    """
+    quoted = round_trip_gas_units(buy_quote, sell_quote)
+    corrected = round_trip_gas_units(buy_quote, sell_quote, correction=correction)
+    if not quoted or not corrected:
+        return Decimal(1)
+    return Decimal(corrected) / Decimal(quoted)
