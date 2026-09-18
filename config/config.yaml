@@ -105,7 +105,9 @@ providers:
     supported_networks: [polygon]
 
   - provider_id: velora
-    enabled: true
+    # Выключен по решению оператора 18.09: в работе остаётся только
+    # Uniswap.
+    enabled: false
     emoji: "👾"
     ui_url: "https://app.velora.xyz"
     # Покупка и продажа у этого агрегатора. Разрешение двухуровневое:
