@@ -130,6 +130,8 @@ class ScriptedNode:
         self.receipt_ok = receipt_ok
         self.effective_gas_price = effective_gas_price
         self.sent: list[str] = []
+        #: Надбавка последней отправленной транзакции, в wei.
+        self.last_tip: int | None = None
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
         body: dict[str, Any] = request.json_body or {}
@@ -154,7 +156,12 @@ class ScriptedNode:
         if method == "eth_estimateGas":
             return _ok(hex(200_000))
         if method == "eth_sendRawTransaction":
-            self.sent.append(str(params[0])[:20])
+            raw = str(params[0])
+            self.sent.append(raw[:20])
+            # Надбавку узел видит только из самой подписанной транзакции,
+            # поэтому стенд её оттуда и достаёт: иначе проверить, какое
+            # значение ушло в сеть, было бы нечем.
+            self.last_tip = _decoded_tip(raw)
             return _ok("0x" + "ab" * 32)
         if method == "eth_getTransactionReceipt":
             if self.receipt_ok is None:
@@ -172,6 +179,15 @@ class ScriptedNode:
                 receipt["effectiveGasPrice"] = hex(self.effective_gas_price)
             return _ok(receipt)
         raise AssertionError(f"неожиданный вызов узла: {method}")
+
+
+def _decoded_tip(raw_transaction: str) -> int:
+    """``maxPriorityFeePerGas`` из подписанной транзакции типа 2."""
+    import rlp  # type: ignore[import-untyped]
+
+    payload = bytes.fromhex(raw_transaction.removeprefix("0x"))
+    fields = rlp.decode(payload[1:])
+    return int.from_bytes(fields[2], "big") if fields[2] else 0
 
 
 def _ok(result: Any) -> HttpResponse:
@@ -202,4 +218,7 @@ def build_sender(node: ScriptedNode, clock: FakeClock, wallet: TradingWallet) ->
         account=build_account(node, clock, wallet.address),
         clock=clock,
         chain_ids={str(f.POLYGON): 137},
+        # Надбавка — свойство сети; в стенде она заметная, чтобы её
+        # попадание в подписанную транзакцию было проверяемо.
+        priority_fees_wei={str(f.POLYGON): 30_000_000_000},
     )

@@ -12,7 +12,9 @@ import json
 from decimal import Decimal
 
 import pytest
+from eth_account import Account
 
+from monik.config.secrets import SecretValue
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.errors import DataError
@@ -24,7 +26,7 @@ from monik.domain.models.execution import (
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import FakeHttpClient, HttpResponse
 from monik.services.observability import FakeClock
-from monik.services.trading import ChainAccount
+from monik.services.trading import ChainAccount, TradingWallet, TransactionSender
 from monik.services.trading.chain import UNLIMITED_ALLOWANCE
 from tests import factories as f
 from tests.unit.providers.support import resource_manager
@@ -220,7 +222,11 @@ class TestWaiting:
             rpc_urls={str(f.POLYGON): "https://rpc.example"},
         )
         sender = TransactionSender(
-            wallet=wallet, account=account, clock=clock, chain_ids={str(f.POLYGON): 137}
+            wallet=wallet,
+            account=account,
+            clock=clock,
+            chain_ids={str(f.POLYGON): 137},
+            priority_fees_wei={str(f.POLYGON): 30_000_000_000},
         )
         sent = await sender.send(f.POLYGON, to="0x" + "11" * 20, data="0x", gas_limit=21_000)
 
@@ -276,3 +282,60 @@ class TestPriority:
         await account.gas_price(f.POLYGON)
 
         assert recorder.priorities == [RequestPriority.ANN_BUY]
+
+
+class TestNetworkPriorityFee:
+    """Надбавка в подписанной транзакции берётся у её сети.
+
+    Ошибка здесь не видна ни в одном отчёте: транзакция пройдёт, просто
+    заплатит в тысячу раз больше, чем нужно.
+    """
+
+    async def test_signed_transaction_carries_the_fee_of_its_network(self) -> None:
+        clock = FakeClock(f.NOW)
+        node = ScriptedNode()
+        wallet = TradingWallet(SecretValue("K", str(Account.create().key.hex())))
+        account = ChainAccount(
+            address=wallet.address,
+            http=FakeHttpClient(handler=node),
+            resources=resource_manager(clock),
+            clock=clock,
+            rpc_urls={str(f.POLYGON): RPC_URL},
+        )
+        sender = TransactionSender(
+            wallet=wallet,
+            account=account,
+            clock=clock,
+            chain_ids={str(f.POLYGON): 137},
+            # Сеть надбавки не требует.
+            priority_fees_wei={str(f.POLYGON): 0},
+        )
+
+        await sender.send(f.POLYGON, to="0x" + "11" * 20, data="0x", gas_limit=21_000)
+
+        assert node.sent, "транзакция ушла"
+        # Прямой разбор подписанной транзакции: надбавка обязана быть нулём.
+        assert node.last_tip == 0
+
+    async def test_fee_is_taken_from_the_network_that_is_used(self) -> None:
+        clock = FakeClock(f.NOW)
+        node = ScriptedNode()
+        wallet = TradingWallet(SecretValue("K", str(Account.create().key.hex())))
+        account = ChainAccount(
+            address=wallet.address,
+            http=FakeHttpClient(handler=node),
+            resources=resource_manager(clock),
+            clock=clock,
+            rpc_urls={str(f.POLYGON): RPC_URL},
+        )
+        sender = TransactionSender(
+            wallet=wallet,
+            account=account,
+            clock=clock,
+            chain_ids={str(f.POLYGON): 137},
+            priority_fees_wei={"arbitrum": 30_000_000_000},
+        )
+
+        await sender.send(f.POLYGON, to="0x" + "11" * 20, data="0x", gas_limit=21_000)
+
+        assert node.last_tip == 0, "надбавка соседней сети сюда не попадает"

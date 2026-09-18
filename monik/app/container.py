@@ -440,6 +440,10 @@ def build_container(
             chain_ids={
                 str(network.network_id): network.chain_id for network in config.enabled_networks
             },
+            priority_fees_wei={
+                str(network.network_id): network.priority_fee_wei
+                for network in config.enabled_networks
+            },
         )
         base_decimals = {
             str(network.network_id): _base_decimals(config, network.network_id)
@@ -688,6 +692,10 @@ def _gas_providers(
                     rpc_urls=rpc_urls,
                     freshness_seconds=config.gas.freshness_seconds,
                     timeout_seconds=config.gas.request_timeout_seconds,
+                    priority_fees_wei={
+                        str(network.network_id): network.priority_fee_wei
+                        for network in config.enabled_networks
+                    },
                 )
             )
     if not providers:

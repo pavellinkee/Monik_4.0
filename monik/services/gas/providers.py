@@ -97,7 +97,7 @@ class RpcGasPriceProvider:
         clock: Clock,
         rpc_urls: dict[str, str],
         freshness_seconds: int,
-        priority_fee_wei: int = 30_000_000_000,
+        priority_fees_wei: dict[str, int] | None = None,
         timeout_seconds: float = 5.0,
     ) -> None:
         self._http = http
@@ -105,7 +105,8 @@ class RpcGasPriceProvider:
         self._clock = clock
         self._rpc_urls = dict(rpc_urls)
         self._freshness = timedelta(seconds=freshness_seconds)
-        self._priority_fee_wei = priority_fee_wei
+        #: Надбавка по сетям: свойство сети, а не приложения.
+        self._priority_fees_wei = dict(priority_fees_wei or {})
         self._timeout = timedelta(seconds=timeout_seconds)
 
     async def gas_price(self, network_id: NetworkId) -> GasPrice | None:
@@ -127,11 +128,12 @@ class RpcGasPriceProvider:
                 observed_at=now,
                 expires_at=now + self._freshness,
             )
+        tip = self._priority_fees_wei.get(str(network_id), 0)
         return GasPrice(
             network_id=network_id,
-            wei_per_gas=base_fee + self._priority_fee_wei,
+            wei_per_gas=base_fee + tip,
             base_fee_wei=base_fee,
-            priority_fee_wei=self._priority_fee_wei,
+            priority_fee_wei=tip,
             source="rpc:eth_feeHistory",
             observed_at=now,
             expires_at=now + self._freshness,

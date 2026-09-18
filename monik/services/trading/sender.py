@@ -51,13 +51,17 @@ class TransactionSender:
         account: ChainAccount,
         clock: Clock,
         chain_ids: dict[str, int],
-        priority_fee_wei: int = 30_000_000_000,
+        priority_fees_wei: dict[str, int],
     ) -> None:
         self._wallet = wallet
         self._account = account
         self._clock = clock
         self._chain_ids = dict(chain_ids)
-        self._priority_fee_wei = priority_fee_wei
+        #: Надбавка к базовой цене газа по сетям. Значение принадлежит
+        #: сети: в одной за место в блоке идёт торг, в другой его нет
+        #: вовсе, и общее значение означало бы либо застрявшие
+        #: транзакции, либо многократную переплату.
+        self._priority_fees_wei = dict(priority_fees_wei)
         self._lock = asyncio.Lock()
 
     async def send(
@@ -90,14 +94,15 @@ class TransactionSender:
             gas = int(limit * _GAS_HEADROOM)
             price = await self._account.gas_price(network_id, priority=priority)
             nonce = await self._account.nonce(network_id, priority=priority)
+            tip = self._priority_fees_wei.get(str(network_id), 0)
             raw = self._wallet.sign_transaction(
                 {
                     "to": to,
                     "value": value,
                     "data": data,
                     "gas": gas,
-                    "maxFeePerGas": price * 2 + self._priority_fee_wei,
-                    "maxPriorityFeePerGas": self._priority_fee_wei,
+                    "maxFeePerGas": price * 2 + tip,
+                    "maxPriorityFeePerGas": tip,
                     "nonce": nonce,
                     "chainId": chain_id,
                     "type": 2,

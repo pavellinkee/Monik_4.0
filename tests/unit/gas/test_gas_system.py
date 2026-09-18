@@ -98,7 +98,9 @@ class TestRpcGasPriceProvider:
             clock=clock,
             rpc_urls={str(f.POLYGON): "https://polygon-rpc.com"},
             freshness_seconds=60,
-            priority_fee_wei=30_000_000_000,
+            # Надбавка принадлежит сети: у одной за место в блоке идёт
+            # торг, у другой его нет вовсе.
+            priority_fees_wei={str(f.POLYGON): 30_000_000_000},
         )
 
     def _result(self, value: object) -> HttpResponse:
@@ -218,3 +220,52 @@ class _CountingProvider:
             source="test-node",
             observed_at=f.NOW,
         )
+
+
+class TestNetworkPriorityFee:
+    """Надбавка к базовой цене газа принадлежит сети.
+
+    В одной сети за место в блоке идёт торг, и без заметной надбавки
+    транзакция может не попасть в блок вовсе. В другой торга нет: все
+    транзакции просят ноль и платят ровно базовую цену, которая там на
+    три порядка ниже. Одно общее значение означало бы либо застрявшие
+    транзакции, либо многократную переплату.
+    """
+
+    def _provider(self, clock: FakeClock, fees: dict[str, int]) -> RpcGasPriceProvider:
+        return RpcGasPriceProvider(
+            http=FakeHttpClient(
+                [
+                    HttpResponse(status_code=200, text=json.dumps({"result": "0x3b9aca00"})),
+                    HttpResponse(
+                        status_code=200,
+                        text=json.dumps(
+                            {"result": {"baseFeePerGas": ["0x2540be400", "0x3b9aca00"]}}
+                        ),
+                    ),
+                ]
+            ),
+            resources=resource_manager(clock),
+            clock=clock,
+            rpc_urls={str(f.POLYGON): "https://polygon-rpc.com"},
+            freshness_seconds=60,
+            priority_fees_wei=fees,
+        )
+
+    async def test_network_without_a_fee_pays_only_the_base(self) -> None:
+        clock = FakeClock(f.NOW)
+        price = await self._provider(clock, {}).gas_price(f.POLYGON)
+
+        assert price is not None
+        assert price.priority_fee_wei == 0
+        assert price.wei_per_gas == price.base_fee_wei
+
+    async def test_fee_of_one_network_does_not_reach_another(self) -> None:
+        """Иначе сеть без торга платила бы надбавку соседней."""
+        clock = FakeClock(f.NOW)
+        provider = self._provider(clock, {"arbitrum": 30_000_000_000})
+
+        price = await provider.gas_price(f.POLYGON)
+
+        assert price is not None
+        assert price.priority_fee_wei == 0
